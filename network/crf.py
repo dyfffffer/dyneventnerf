@@ -37,13 +37,36 @@ class CRF(nn.Module):
             optim.step()
         optim.zero_grad()
 
+    # def forward(self, x, skip_learn=False):
+    #     if not skip_learn:
+    #         x = x.permute(1, 2, 0)
+    #         ori_shape = x.shape
+    #         对整张图的每个通道像素独立做 MLP
+    #         x_in = x.reshape(-1, 1)
+    #         res_x = self.linear(x_in) * 0.1
+    #         x_out = torch.sigmoid(res_x + x_in)
+    #         return x_out.reshape(ori_shape).permute(2, 0, 1)
+    #     else:
+    #         return x
+
     def forward(self, x, skip_learn=False):
-        if not skip_learn:
-            x = x.permute(1, 2, 0)
-            ori_shape = x.shape
+        if skip_learn:
+            return x
+
+        if x.dim() == 2:  # (N,3)
+            N, C = x.shape
             x_in = x.reshape(-1, 1)
             res_x = self.linear(x_in) * 0.1
             x_out = torch.sigmoid(res_x + x_in)
-            return x_out.reshape(ori_shape).permute(2, 0, 1)
+            return x_out.reshape(N, C)
+
+        elif x.dim() == 3:  # (C,H,W)
+            x = x.permute(1,2,0)
+            ori_shape = x.shape
+            x_in = x.reshape(-1,1)
+            res_x = self.linear(x_in) * 0.1
+            x_out = torch.sigmoid(res_x + x_in)
+            return x_out.reshape(ori_shape).permute(2,0,1)
+
         else:
-            return x
+            raise RuntimeError("Unsupported CRF input shape")
