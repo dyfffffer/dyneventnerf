@@ -545,6 +545,10 @@ def ddp_train_nerf(local_rank, args):
             name = 'net'
             to_save[name] = models[name].state_dict()
 
+            if 'crf_net' in models:
+                name = 'crf_net'
+                to_save[name] = models[name].state_dict()
+
             name = 'optim'
             to_save[name] = models[name].state_dict()
 
