@@ -28,10 +28,11 @@ def create_nerf(rank, args, camera_mgr, load_camera_mgr=True, load_optimizer=Tru
 
     #增加crf参数化
 
+    crf_lrate = getattr(args, "crf_lrate", args.lrate)
     optim = torch.optim.AdamW(
         [
             {"params": net.parameters(), "lr": args.lrate},
-            {"params": crf_net.parameters(), "lr": args.crf_lrate},  # 可单独学习率
+            {"params": crf_net.parameters(), "lr": crf_lrate},
         ],
         weight_decay=args.weight_decay
     )
@@ -41,8 +42,6 @@ def create_nerf(rank, args, camera_mgr, load_camera_mgr=True, load_optimizer=Tru
     models["optim"] = optim
 
 
-
-    optim = torch.optim.AdamW(net.parameters(), lr=args.lrate, weight_decay=args.weight_decay)
     if use_lr_scheduler:
         lr_scheduler = torch.optim.lr_scheduler.LambdaLR(optim, lambda it: it/4000 if it < 4000 else 0.95**(it/10000))
     else:
