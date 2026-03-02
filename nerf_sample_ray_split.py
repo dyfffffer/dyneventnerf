@@ -321,21 +321,19 @@ class RaySamplerSingleEventStream:
         else:
             return None
 
-    def get_closest_rgb_linear(self, timestamp):
+    def get_closest_srgb(self, timestamp):
         dists = [(abs(self.reverse_map_time(frame_number) - timestamp), image_idx)
-                 for image_idx, (frame_number, _) in enumerate(self.rgbs_linear)]
+                 for image_idx, (frame_number, _) in enumerate(self.sRGB)]
 
         min_dist, min_idx = min(dists)
-        closest_rgb_linear = self.rgbs_linear[min_idx][1]
-        return closest_rgb_linear
+        closest_srgb = self.sRGB[min_idx][1]
+        return closest_srgb
 
     def get_rgb(self, timestamp=0):
-        if self.rgbs_linear is not None:
-            # return self.rgb.reshape((self.H, self.W, 3))
-            # take the first one
-            closest_rgb_linear = self.get_closest_rgb_linear(timestamp)
-            # return self.rgbs_linear[0][1].reshape((self.H, self.W, -1))
-            return closest_rgb_linear.reshape((self.H, self.W, -1))
+        if self.sRGB is not None:
+            # take the closest frame
+            closest_srgb = self.get_closest_srgb(timestamp)
+            return closest_srgb.reshape((self.H, self.W, -1))
         else:
             return None
 
@@ -344,7 +342,7 @@ class RaySamplerSingleEventStream:
         min_depth = 1e-4 * torch.ones_like(self.rays_d[..., 0])
         rays_t = timestamp * torch.ones_like(self.rays_d[..., 0])
 
-        closest_rgb_linear = self.get_closest_rgb_linear(timestamp)
+        closest_srgb = self.get_closest_srgb(timestamp)
 
         ret = OrderedDict([
             ('ray_o', self.rays_o),
@@ -354,7 +352,7 @@ class RaySamplerSingleEventStream:
             ('min_depth', min_depth),
 
             # take the closest frame
-            ('rgb_linear', closest_rgb_linear),
+            ('rgb_linear', closest_srgb),
             ('color_mask', self.color_mask),
             ('mask', self.mask),
             ('background_linear', self.background_linear),
@@ -386,17 +384,17 @@ class RaySamplerSingleEventStream:
         event_frame = event_frame.numpy()
 
         # todo: debug here
-        dists = [(abs(self.reverse_map_time(num)-end_t), idx) for idx, (num, _) in enumerate(self.rgbs_linear)]
+        dists = [(abs(self.reverse_map_time(num)-end_t), idx) for idx, (num, _) in enumerate(self.sRGB)]
         dists.sort()
         # take the two closest: a < map_time(end_t) < b
         dists = dists[:2]
 
         ref_idx = dists[np.random.randint(len(dists))][1]
-        ref_frame_number, ref_rgb_linear = self.rgbs_linear[ref_idx]
+        ref_frame_number, ref_srgb = self.sRGB[ref_idx]
         ref_t = self.reverse_map_time(ref_frame_number)
 
-        # ref_idx = np.random.randint(len(self.rgbs_linear))
-        # ref_frame_number, ref_rgb_linear = self.rgbs_linear[ref_idx]
+        # ref_idx = np.random.randint(len(self.sRGB))
+        # ref_frame_number, ref_srgb = self.sRGB[ref_idx]
         # ref_t = self.reverse_map_time(ref_frame_number)
 
         if ref_t < end_t:
@@ -464,13 +462,13 @@ class RaySamplerSingleEventStream:
             events = None
             events_from_ref_to_end = None
 
-        # if self.rgbs_linear is not None:
-        #     ref_rgb_linear = ref_rgb_linear[select_inds, :]          # [N_rand, 3], or [N_rand, 1]
+        # if self.sRGB is not None:
+        #     ref_srgb = ref_srgb[select_inds, :]          # [N_rand, 3], or [N_rand, 1]
         # else:
-        #     ref_rgb_linear = None
+        #     ref_srgb = None
         
         if self.sRGB is not None:
-            sRGB = sRGB[select_inds, :]          # [N_rand, 3], or [N_rand, 1]
+            sRGB = ref_srgb[select_inds, :]          # [N_rand, 3], or [N_rand, 1]
         else:
             sRGB = None
 
