@@ -28,10 +28,11 @@ def create_nerf(rank, args, camera_mgr, load_camera_mgr=True, load_optimizer=Tru
 
     #增加crf参数化
 
+    crf_lrate = getattr(args, "crf_lrate", args.lrate)
     optim = torch.optim.AdamW(
         [
             {"params": net.parameters(), "lr": args.lrate},
-            {"params": crf_net.parameters(), "lr": args.crf_lrate},  # 可单独学习率
+            {"params": crf_net.parameters(), "lr": crf_lrate},
         ],
         weight_decay=args.weight_decay
     )
@@ -41,8 +42,6 @@ def create_nerf(rank, args, camera_mgr, load_camera_mgr=True, load_optimizer=Tru
     models["optim"] = optim
 
 
-
-    optim = torch.optim.AdamW(net.parameters(), lr=args.lrate, weight_decay=args.weight_decay)
     if use_lr_scheduler:
         lr_scheduler = torch.optim.lr_scheduler.LambdaLR(optim, lambda it: it/4000 if it < 4000 else 0.95**(it/10000))
     else:
@@ -104,29 +103,53 @@ def create_nerf(rank, args, camera_mgr, load_camera_mgr=True, load_optimizer=Tru
         to_load = torch.load(fpath, map_location=map_location)
 
         names = ['net']
+        if 'crf_net' in to_load:
+            names.append('crf_net')
         if load_optimizer:
             names.append('optim')
             names.append('lr_scheduler')
+
+        optim_loaded = True
 
         for name in names:
             if name == 'net':
                 # print(name) # bound_transform.translation
                 if 'bound_transform.translation' not in to_load[name]:
                     to_load[name]['bound_transform.translation'] = models[name].bound_transform.translation
-            if name == 'lr_scheduler' and name not in to_load:
-                models[name].last_epoch = start
+            if name == 'lr_scheduler':
+                if name not in to_load:
+                    models[name].last_epoch = start
+                    continue
+                if not optim_loaded:
+                    logger.warning('Skipping lr_scheduler state load because optimizer state was not loaded.')
+                    models[name].last_epoch = start
+                    continue
+            if name not in to_load:
+                logger.warning(f'{name} not found in checkpoint, skipping load for this module.')
                 continue
             # models[name].load_state_dict(to_load[name])  # todo: remove strict
             state_dict = to_load[name]
 
-            # ===== 关键：去掉 DDP 的 module. 前缀 =====
-            if list(state_dict.keys())[0].startswith('module.'):
+            # ===== 关键：去掉 DDP 的 module. 前缀（仅模型参数字典） =====
+            if isinstance(state_dict, dict) and len(state_dict) > 0 and list(state_dict.keys())[0].startswith('module.'):
                 state_dict = {
                     k.replace('module.', '', 1): v
                     for k, v in state_dict.items()
                 }
 
-            models[name].load_state_dict(state_dict, strict=True)
+            if name in ['net', 'crf_net']:
+                models[name].load_state_dict(state_dict, strict=True)
+            elif name == 'optim':
+                try:
+                    models[name].load_state_dict(state_dict)
+                except ValueError as e:
+                    if 'different number of parameter groups' in str(e):
+                        optim_loaded = False
+                        logger.warning('Optimizer state has different parameter groups from current model; skipping optimizer reload.')
+                    else:
+                        raise
+            else:
+                models[name].load_state_dict(state_dict)
 
 
         if load_camera_mgr:
