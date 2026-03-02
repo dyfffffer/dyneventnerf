@@ -36,52 +36,56 @@ def process_calib(out_path, calib):
     check_call(['./4_normalize_poses.py', intr, raw_pose, norm_pose, norm_camdict])
 
 
-EDI_CMD = [
-    '../edi/edi3',
-    # values from the new studio data
-    # '-p', '0.3',
-    # '-n', '-0.5',
-    # '-e', '0e-3',
-    # '-s', 'linear',
+# EDI_CMD = [
+#     '../edi/edi3',
+#     # values from the new studio data
+#     # '-p', '0.3',
+#     # '-n', '-0.5',
+#     # '-e', '0e-3',
+#     # '-s', 'linear',
 
-    # values from the new studio data (first line)
-    # '-p', '0.7',
-    # '-n', '-0.7',
-    # '-e', '12e-3',
-    # '-s', 'srgb',
+#     # values from the new studio data (first line)
+#     # '-p', '0.7',
+#     # '-n', '-0.7',
+#     # '-e', '12e-3',
+#     # '-s', 'srgb',
 
-    # linear 0.6
-    # '-p', '0.6',
-    # '-n', '-0.6',
-    # '-e', '0',
-    # '-s', 'linear',
+#     # linear 0.6
+#     # '-p', '0.6',
+#     # '-n', '-0.6',
+#     # '-e', '0',
+#     # '-s', 'linear',
 
-    # linear 0.32
-    # '-p', '0.32',
-    # '-n', '-0.32',
-    # '-e', '0',
-    # '-s', 'linear',
+#     # linear 0.32
+#     # '-p', '0.32',
+#     # '-n', '-0.32',
+#     # '-e', '0',
+#     # '-s', 'linear',
 
-    # linearshift 0.6
-    # '-p', '0.6',
-    # '-n', '-0.6',
-    # '-e', '3e-2',
-    # '-s', 'linearshift',
+#     # linearshift 0.6
+#     # '-p', '0.6',
+#     # '-n', '-0.6',
+#     # '-e', '3e-2',
+#     # '-s', 'linearshift',
 
-    # linearshift 0.32
-    # '-p', '0.32',
-    # '-n', '-0.32',
-    # '-e', '3e-2',
-    # '-s', 'linearshift',
+#     # linearshift 0.32
+#     # '-p', '0.32',
+#     # '-n', '-0.32',
+#     # '-e', '3e-2',
+#     # '-s', 'linearshift',
 
-    # linearshift 0.5
-    '-p', '0.5',
-    '-n', '-0.5',
-    '-e', '3e-2',
-    '-s', 'linearshift',
+#     # linearshift 0.5
+#     '-p', '0.5',
+#     '-n', '-0.5',
+#     '-e', '3e-2',
+#     '-s', 'linearshift',
 
-    '--debayering', 'none'
-]
+#     '--debayering', 'none'
+# ]
+
+EDI_CMD = ['xvfb-run', '-a', '../edi/edi3', 
+           '-p', '0.5', '-n', '-0.5', '-e', '3e-2', 
+           '-s', 'linearshift', '--debayering', 'none']
 
 
 def extract_frame_with_edi(aedat, t0, timestamp, out_path):

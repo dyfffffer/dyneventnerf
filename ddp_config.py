@@ -236,4 +236,6 @@ def config_parser(config_path=None):
     parser.add_argument("--i_img", type=int, default=500, help='frequency of tensorboard image logging (if <0, then no images are logged)')
     parser.add_argument("--i_weights", type=int, default=10000, help='frequency of weight ckpt saving')
 
+    parser.add_argument("--local_rank", type=int, default=0, help="Local rank for torchrun")
+
     return parser

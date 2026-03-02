@@ -15,6 +15,7 @@ from ddp_config import logger
 from distortion import undistort_norm
 from edi_cpp import EventStorage
 from tonemapping import Gamma22
+from network.crf import CRF
 
 
 ########################################################################################################################
@@ -122,6 +123,32 @@ def get_rays_single_image(H, W, intrinsics, c2w):
 
 
     pixels = torch.stack((u, v, torch.ones_like(u)), axis=0)  # (3, H*W)
+
+    # print("==== Debug ====")
+    # # import torch
+    # print("intrinsics dtype, device, shape, contiguous, anynan:",
+    #     intrinsics.dtype, intrinsics.device, intrinsics.shape, intrinsics.is_contiguous(), torch.isnan(intrinsics).any().item())
+    # print("c2w dtype, device, shape, contiguous, anynan:",
+    #     c2w.dtype, c2w.device, c2w.shape, c2w.is_contiguous(), torch.isnan(c2w).any().item())
+
+    # A = intrinsics[:3, :3]
+    # B = c2w[:3, :3]
+    # print("A dtype, device, shape, contiguous:", A.dtype, A.device, A.shape, A.is_contiguous())
+    # print("B dtype, device, shape, contiguous:", B.dtype, B.device, B.shape, B.is_contiguous())
+    # print("c2w[:3, :3]", c2w[:3, :3])
+    # print("intrinsics[:3, :3]", intrinsics[:3, :3])
+    # print("torch.inverse(intrinsics[:3, :3])", torch.inverse(intrinsics[:3, :3]))
+
+    # print("===========\n")
+
+
+    # R = c2w[:3, :3].detach().cpu()
+    # K = intrinsics[:3, :3].detach().cpu()
+    # Kinv = torch.linalg.inv(K)
+
+    # ray_matrix = (R @ Kinv).to(c2w.device)
+
+
 
     ray_matrix = torch.matmul(c2w[:3, :3], torch.inverse(intrinsics[:3, :3]))
     # rays_d = np.dot(np.linalg.inv(intrinsics[:3, :3]), pixels)
@@ -267,29 +294,34 @@ class RaySamplerSingleEventStream:
             else:
                 self.background_linear = None
 
+            '''
+            对每一帧RGB图像，缩放到当前分辨率，处理单通道、RGB、RGBA情况，转换到线性空间，存储为 (frame_number, rgb_linear_array) 列表
+            '''
             if self.rgb_paths is not None:
                 logger.info(f'rgbs: {self.rgb_paths}')
 
-                self.rgbs_linear = []
+                self.sRGB = []
                 for frame_number, path in self.rgb_paths:
-                    rgb_linear = imageio.imread(path).astype(np.float32) / 255.
-                    rgb_linear = cv2.resize(rgb_linear, (self.W, self.H), interpolation=cv2.INTER_AREA)
+                    sRGB = imageio.imread(path).astype(np.float32) / 255.
+                    sRGB = cv2.resize(sRGB, (self.W, self.H), interpolation=cv2.INTER_AREA)
 
-                    if len(rgb_linear.shape) == 2:
+                    if len(sRGB.shape) == 2:
                         # # todo: this needs to go. there's no good reason for that anymore
                         # #       it only makes things worse with the current pre-masked rgb input
                         # #       no way to detect if they are 3 channels too
                         # rgb = np.tile(rgb[..., None], (1, 1, 3)).reshape((-1, 3))
-                        rgb_linear = rgb_linear[..., None].reshape((-1, 1))
-                    elif rgb_linear.shape[2] == 4:
+                        sRGB = sRGB[..., None].reshape((-1, 1))
+                    elif sRGB.shape[2] == 4:
                         # mask = rgb[..., 3].reshape((-1,))
-                        rgb_linear = rgb_linear[..., :3].reshape((-1, 3))
-                    elif rgb_linear.shape[2] == 3:
-                        rgb_linear = rgb_linear.reshape((-1, 3))
-                    rgb_linear = Gamma22.to_linear(rgb_linear)
-                    self.rgbs_linear.append((frame_number, rgb_linear))
+                        sRGB = sRGB[..., :3].reshape((-1, 3))
+                    elif sRGB.shape[2] == 3:
+                        sRGB = sRGB.reshape((-1, 3))
+                    # rgb_linear = Gamma22.to_linear(sRGB)
+                    
+                    # rgb_linear = crf(sRGB, skip_learn=iteration<opt.warmup)
+                    self.sRGB.append((frame_number, sRGB))
             else:
-                self.rgbs_linear = None
+                self.sRGB = None
 
         self.rays_o, self.rays_d, self.depth, self.ray_matrix = None, None, None, None
 
@@ -454,10 +486,15 @@ class RaySamplerSingleEventStream:
             events = None
             events_from_ref_to_end = None
 
-        if self.rgbs_linear is not None:
-            ref_rgb_linear = ref_rgb_linear[select_inds, :]          # [N_rand, 3], or [N_rand, 1]
+        # if self.rgbs_linear is not None:
+        #     ref_rgb_linear = ref_rgb_linear[select_inds, :]          # [N_rand, 3], or [N_rand, 1]
+        # else:
+        #     ref_rgb_linear = None
+        
+        if self.sRGB is not None:
+            sRGB = sRGB[select_inds, :]          # [N_rand, 3], or [N_rand, 1]
         else:
-            ref_rgb_linear = None
+            sRGB = None
 
         if self.mask is not None:
             mask = self.mask[select_inds]
@@ -490,7 +527,8 @@ class RaySamplerSingleEventStream:
             ('events_from_ref_to_end', events_from_ref_to_end),
             ('min_depth', min_depth),
 
-            ('rgb_linear', ref_rgb_linear),
+            # ('rgb_linear', ref_rgb_linear),
+            ('sRGB', sRGB),
             ('color_mask', color_mask),
             ('mask', mask),
             ('background_linear', background_linear),

@@ -120,7 +120,9 @@ def colorize_np(x, cmap_name='jet', mask=None, append_cbar=False, vmin=None, vma
 
 # tensor
 def colorize(x, cmap_name='jet', append_cbar=False, mask=None):
-    x = x.numpy()
+    # x = x.numpy()
+    x = x.detach().cpu().numpy()
+
     if mask is not None:
         mask = mask.numpy().astype(dtype=np.bool)
     x, cbar = colorize_np(x, cmap_name, mask)

@@ -234,7 +234,8 @@ struct MyVideoWriter {
 
 		av::OptValueMap codecOpts = {{"crf", crf}};
 		// todo: figure out how to set output pixFmt to yuv444p
-		videoStreamIdx = writer->addVideoStream(AV_CODEC_ID_H264, width, height, pixFmt, frameRate, width, height, AV_PIX_FMT_YUV444P, std::move(codecOpts)).value();
+		// videoStreamIdx = writer->addVideoStream(AV_CODEC_ID_H264, width, height, pixFmt, frameRate, width, height, AV_PIX_FMT_YUV444P, std::move(codecOpts)).value();
+		videoStreamIdx = writer->addVideoStream(AV_CODEC_ID_H264, width, height, pixFmt, frameRate, std::move(codecOpts)).value();
 
 		assertExpected(writer->open());
 		bufferFrame = newWriteableVideoFrame(width, height, pixFmt);
@@ -427,8 +428,9 @@ int main(int argc, char **argv) {
 	} else if (colorSpaceName == "linearshift") {
 		colorSpace = std::make_unique<LinearShiftSpace>();
 	} else {
-		throw dv::exceptions::InvalidArgument<dv::cstring>(
-			"Unknown color space", colorSpaceName);
+		// throw dv::exceptions::InvalidArgument<dv::cstring>(
+		// 	"Unknown color space", colorSpaceName);
+		throw dv::exceptions::InvalidArgument<std::string>("...");
 	}
 
 	auto debayeringMethod = cv::COLOR_BayerBG2BGR;
@@ -442,8 +444,9 @@ int main(int argc, char **argv) {
 		/* debayeringMethod = static_cast<cv::ColorConversionCodes>(-1); */
 		debayeringMethod = cv::COLOR_GRAY2BGR;
 	} else {
-		throw dv::exceptions::InvalidArgument<dv::cstring>(
-			"Unknown debayering method", debayeringName);
+		// throw dv::exceptions::InvalidArgument<dv::cstring>(
+		// 	"Unknown debayering method", debayeringName);
+		throw dv::exceptions::InvalidArgument<std::string>("Unknown debayering method");
 	}
 
     std::unique_ptr<dv::io::MonoCameraRecording> reader;
@@ -483,8 +486,9 @@ int main(int argc, char **argv) {
 
 			// Check whether at least one of the streams is available
 			if (!framesAvailable || !eventsAvailable) {
-				throw dv::exceptions::InvalidArgument<dv::cstring>(
-					"Aedat4 player requires a file with at least event and frame stream available", aedat4Path);
+				// throw dv::exceptions::InvalidArgument<dv::cstring>(
+				// 	"Aedat4 player requires a file with at least event and frame stream available", aedat4Path);
+				throw dv::exceptions::InvalidArgument<std::string>("Aedat4 player requires a file with at least event and frame stream available");
 			}
 			break;
 		}

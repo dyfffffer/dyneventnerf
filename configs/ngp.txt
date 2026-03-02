@@ -1,6 +1,6 @@
 ### INPUT
-datadir = <absolute-path-to-code>
-basedir = <absolute-path-to-code>/logs_auto
+datadir = /data/dyf/DATA/DynEventnerf/processed_synth
+basedir = /home/dengyufei/DynEventNeRF/logs_auto
 config = None
 no_reload = False
 testskip = 1

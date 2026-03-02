@@ -50,37 +50,61 @@ if frame_list:
         frame_list = [int(l.strip()) for l in f.readlines() if l.strip()]
     print('found', len(frame_list), 'frames', 'in the list')
 
+
 globs_by_split = {
     'test': [
-        ('test00050', 'train_*/render_validation_*/r_00050.png'),
-        ('test00383', 'train_*/render_validation_*/r_00383.png'),
-        ('test00716', 'train_*/render_validation_*/r_00716.png'),
-    ],
-
-    'train': [
-        ('train00', 'train_*/render_train_*/r_00_0000.png'),
-        ('train01', 'train_*/render_train_*/r_01_0000.png'),
-        ('train02', 'train_*/render_train_*/r_02_0000.png'),
-        ('train03', 'train_*/render_train_*/r_03_0000.png'),
-        ('train04', 'train_*/render_train_*/r_04_0000.png'),
+        ('test0050_0250', 'render_validation_*/r_0050_*__0250.png'),
+        ('test0050_0000', 'render_validation_*/r_0050_*__0000.png'),
+        ('test0050_0500', 'render_validation_*/r_0050_*__0500.png'),
+        ('test0050_0750', 'render_validation_*/r_0050_*__0750.png'),
+        # ('test0716', 'render_validation_*/r_0716_*__0250.png'),
     ]
 }
 
 gt_globs_by_split = {
     'test': [
-        ('test00050', 'validation/r_0050_????.png'),
-        ('test00383', 'validation/r_0383_????.png'),
-        ('test00716', 'validation/r_0716_????.png'),
-    ],
-
-    'train': [
-        ('train00', 'train/r_00_????.png'),
-        ('train01', 'train/r_01_????.png'),
-        ('train02', 'train/r_02_????.png'),
-        ('train03', 'train/r_03_????.png'),
-        ('train04', 'train/r_04_????.png'),
+        ('test0050_0250', 'validation/rgb/0250/r_0050_0250.png'),
+        ('test0050_0000', 'validation/rgb/0000/r_0050_0000.png'),
+        ('test0050_0500', 'validation/rgb/0500/r_0050_0500.png'),
+        ('test0050_0750', 'validation/rgb/0750/r_0050_0750.png'),
+        # ('test0383', 'validation/rgb/0250/r_0383_0250.png'),
+        # ('test0716', 'validation/rgb/0250/r_0716_0250.png'),
     ]
 }
+
+
+
+# globs_by_split = {
+#     'test': [
+#         ('test00050', 'render_validation_*/r_0050_*.png'),
+#         ('test00383', 'render_validation_*/r_0383_*.png'),
+#         ('test00716', 'render_validation_*/r_0716_*.png'),
+#     ],
+
+#     'train': [
+#         ('train00', 'render_train_*/r_00_0000.png'),
+#         ('train01', 'render_train_*/r_01_0000.png'),
+#         ('train02', 'render_train_*/r_02_0000.png'),
+#         ('train03', 'render_train_*/r_03_0000.png'),
+#         ('train04', 'render_train_*/r_04_0000.png'),
+#     ]
+# }
+
+# gt_globs_by_split = {
+#     'test': [
+#         ('test00050', 'validation/rgb/*/r_0050_????.png'),
+#         ('test00383', 'validation/rgb/*/r_0383_????.png'),
+#         ('test00716', 'validation/rgb/*/r_0716_????.png'),
+#     ],
+
+#     'train': [
+#         ('train00', 'train_0/rgb/r_00_????.png'),
+#         ('train01', 'train_0/rgb/r_01_????.png'),
+#         ('train02', 'train_0/rgb/r_02_????.png'),
+#         ('train03', 'train_0/rgb/r_03_????.png'),
+#         ('train04', 'train_0/rgb/r_04_????.png'),
+#     ]
+# }
 
 globs = []
 gt_globs = []
@@ -89,20 +113,15 @@ for split in args.splits.split(','):
     gt_globs += gt_globs_by_split[split]
 
 def extract_frame_id_from_pred(x):
-    # s = re.search(r'frame_([0-9]*)', x)
-    s = re.search(r'train_([0-9]*)', x)
-    if s is None:
-        return None
-    else:
-        return int(s.group(1))
+    # r_0050_0000__0250.png
+    s = re.search(r'r_(\d+)_\d+__(\d+)', x)
+    return (int(s.group(1)), int(s.group(2)))
 
 def extract_frame_id_from_gt(x):
-    # s = re.search(r'frame_([0-9]*)', x)
-    s = re.search(r'_([0-9]*).png', x)
-    if s is None:
-        return None
-    else:
-        return int(s.group(1))
+    # r_0050_0250.png
+    s = re.search(r'r_(\d+)_(\d+)', x)
+    return (int(s.group(1)), int(s.group(2)))
+
 
 def compute_psnr(pred, gt):
     # todo: try prequantizing gt files or optimizing the Ax+b color transform?
@@ -141,6 +160,8 @@ for (group_name, suffix), (group_name_, gt_suffix) in zip(globs, gt_globs):
     gts = glob(path.join(gt_dir, gt_suffix))
     preds.sort()
     gts.sort()
+    print("【work_dir】:",work_dir)
+    print("【suffix】:",suffix)
 
     # extract frame numbers
     preds = [(extract_frame_id_from_pred(fn), fn) for fn in preds]
@@ -195,12 +216,16 @@ for (group_name, suffix), (group_name_, gt_suffix) in zip(globs, gt_globs):
     group_ssim[group_name] = average_ssim
     group_lpips[group_name] = average_lpips
 
-    # print(group_name, 'average psnr:', average_psnr)
-    # print(group_name, 'average ssim:', average_ssim)
-    # print(group_name, 'average lpips:', average_lpips)
-
 for split in args.splits.split(','):
     print()
     print(f'average {split} psnr:', np.mean([val for grp, val in group_psnr.items() if split in grp]))
     print(f'average {split} ssim:', np.mean([val for grp, val in group_ssim.items() if split in grp]))
     print(f'average {split} lpips:', np.mean([val for grp, val in group_lpips.items() if split in grp]))
+
+with open(path.join(work_dir, 'eval_results.txt'), 'a') as f:
+    for split in args.splits.split(','):
+        psnr = np.mean([val for grp, val in group_psnr.items() if split in grp])
+        ssim = np.mean([val for grp, val in group_ssim.items() if split in grp])
+        lp = np.mean([val for grp, val in group_lpips.items() if split in grp])
+        f.write(f'{split}: PSNR={psnr:.4f}, SSIM={ssim:.4f}, LPIPS={lp:.4f}\n')
+        print(f'Wrote results to {path.join(work_dir, "eval_results.txt")}')

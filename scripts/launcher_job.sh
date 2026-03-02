@@ -5,7 +5,7 @@
 #SBATCH --gres gpu:1
 #SBATCH -x gpu20-22
 #SBATCH -x gpu24-h100-08
-#SBATCH -o "<absolute-path-to-code>/slurmlogs_auto/%A.out"
+#SBATCH -o "/home/dengyufei/DynEventNeRF/slurmlogs_auto/%A.out"
 
 eval "$(conda shell.bash hook)"
 

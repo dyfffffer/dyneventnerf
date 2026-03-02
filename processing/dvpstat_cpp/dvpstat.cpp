@@ -34,13 +34,13 @@ PYBIND11_MODULE(dvpstat_cpp, m) {
         .def_readwrite("mStreams", &dv::io::FileInfo::mStreams)
         .def_readwrite("mPerStreamDataTables", &dv::io::FileInfo::mPerStreamDataTables);
 
-    /* py::class_<dv::io::Stream>(m, "Stream") */
-    /*     .def(py::init<>()) */
-    /*     .def("getTypeDescription", &dv::io::Stream::getTypeDescription) */
-    /*     .def("getModuleName", &dv::io::Stream::getModuleName) */
-    /*     .def("getOutputName", &dv::io::Stream::getOutputName) */
-    /*     .def("getSource", &dv::io::Stream::getSource) */
-    /*     .def_readwrite("mId", &dv::io::Stream::mId) */
-    /*     .def_readwrite("mName", &dv::io::Stream::mName) */
-    /*     .def_readwrite("mTypeIdentifier", &dv::io::Stream::mTypeIdentifier); */
+     py::class_<dv::io::Stream>(m, "Stream") 
+         .def(py::init<>()) 
+         .def("getTypeDescription", &dv::io::Stream::getTypeDescription) 
+         .def("getModuleName", &dv::io::Stream::getModuleName) 
+         .def("getOutputName", &dv::io::Stream::getOutputName) 
+         .def("getSource", &dv::io::Stream::getSource) 
+         .def_readwrite("mId", &dv::io::Stream::mId) 
+         .def_readwrite("mName", &dv::io::Stream::mName) 
+         .def_readwrite("mTypeIdentifier", &dv::io::Stream::mTypeIdentifier); 
 }

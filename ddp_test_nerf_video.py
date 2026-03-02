@@ -221,6 +221,8 @@ def ddp_test_nerf(rank, args):
 
 
 def test():
+    import pdb
+    pdb.set_trace()
     parser = config_parser()
     args = parser.parse_args()
     logger.info(parser.format_values())

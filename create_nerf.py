@@ -5,6 +5,7 @@ import torch
 import torch.optim
 from ddp_model import NerfNet
 from ddp_config import logger
+from network.crf import CRF
 
 
 def create_nerf(rank, args, camera_mgr, load_camera_mgr=True, load_optimizer=True, use_lr_scheduler=True):
@@ -19,16 +20,35 @@ def create_nerf(rank, args, camera_mgr, load_camera_mgr=True, load_optimizer=Tru
     models['cascade_samples'] = [int(x.strip()) for x in args.cascade_samples.split(',')]
 
     net = NerfNet(args).to(rank)
+    # 创建 CRF 网络
+    crf_net = CRF().to(rank)
     # net = DDP(net, device_ids=[rank], output_device=rank, find_unused_parameters=False)
     # net = DDP(net, device_ids=[rank], output_device=rank)
     # optim = torch.optim.Adam(net.parameters(), lr=args.lrate)
+
+    #增加crf参数化
+
+    optim = torch.optim.AdamW(
+        [
+            {"params": net.parameters(), "lr": args.lrate},
+            {"params": crf_net.parameters(), "lr": args.crf_lrate},  # 可单独学习率
+        ],
+        weight_decay=args.weight_decay
+    )
+
+    models["net"] = net
+    models["crf_net"] = crf_net
+    models["optim"] = optim
+
+
+
     optim = torch.optim.AdamW(net.parameters(), lr=args.lrate, weight_decay=args.weight_decay)
     if use_lr_scheduler:
         lr_scheduler = torch.optim.lr_scheduler.LambdaLR(optim, lambda it: it/4000 if it < 4000 else 0.95**(it/10000))
     else:
         lr_scheduler = torch.optim.lr_scheduler.LambdaLR(optim, lambda it: 1.0)
-    models['net'] = net
-    models['optim'] = optim
+    # models['net'] = net
+    # models['optim'] = optim
     models['lr_scheduler'] = lr_scheduler
 
     models['camera_mgr'] = camera_mgr.to(rank)
@@ -96,7 +116,18 @@ def create_nerf(rank, args, camera_mgr, load_camera_mgr=True, load_optimizer=Tru
             if name == 'lr_scheduler' and name not in to_load:
                 models[name].last_epoch = start
                 continue
-            models[name].load_state_dict(to_load[name])  # todo: remove strict
+            # models[name].load_state_dict(to_load[name])  # todo: remove strict
+            state_dict = to_load[name]
+
+            # ===== 关键：去掉 DDP 的 module. 前缀 =====
+            if list(state_dict.keys())[0].startswith('module.'):
+                state_dict = {
+                    k.replace('module.', '', 1): v
+                    for k, v in state_dict.items()
+                }
+
+            models[name].load_state_dict(state_dict, strict=True)
+
 
         if load_camera_mgr:
             name = 'camera_mgr'

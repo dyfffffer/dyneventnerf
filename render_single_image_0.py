@@ -20,9 +20,9 @@ def render_single_image(rank, world_size, models, ray_sampler, chunk_size, itera
 
     # split into ranks; make sure different processes don't overlap
     # world_size = 1, therefore split_size is always the full shape
-    rank_split_sizes = [ray_batch['ray_d'].shape[0] // world_size, ] * world_size
-    rank_split_sizes[-1] = ray_batch['ray_d'].shape[0] - sum(rank_split_sizes[:-1])
-    # rank_split_sizes = [ray_batch['ray_d'].shape[0]]
+    # rank_split_sizes = [ray_batch['ray_d'].shape[0] // world_size, ] * world_size
+    # rank_split_sizes[-1] = ray_batch['ray_d'].shape[0] - sum(rank_split_sizes[:-1])
+    rank_split_sizes = [ray_batch['ray_d'].shape[0]]
     for key in ray_batch:
         if torch.is_tensor(ray_batch[key]):
             ray_batch[key] = torch.split(ray_batch[key], rank_split_sizes)[rank].to(rank)
@@ -122,36 +122,28 @@ def render_single_image(rank, world_size, models, ray_sampler, chunk_size, itera
             ret_merge_chunk[m][key] = torch.cat(ret_merge_chunk[m][key], dim=0)
 
     # merge results from different processes
-    ret_merge_rank = None
-    for m in range(len(ret_merge_chunk)):
-        for key in ret_merge_chunk[m]:
-            # 获取当前 rank tensor，确保在 GPU 且 contiguous
-            local_tensor = ret_merge_chunk[m][key].cuda().contiguous()
-
-            # 创建存放所有 rank 数据的 list
-            tensor_list = [
-                torch.zeros((rank_split_sizes[r], *local_tensor.shape[1:]), 
-                            device=local_tensor.device) 
-                for r in range(world_size)
-            ]
-
-            # all_gather
-            torch.distributed.all_gather(tensor_list, local_tensor)
-
-            # rank0 拼接
-            if rank == 0:
-                merged = torch.cat(tensor_list, dim=0)
+    if rank == 0:
+        ret_merge_rank = [OrderedDict() for _ in range(len(ret_merge_chunk))]
+        for m in range(len(ret_merge_chunk)):
+            for key in ret_merge_chunk[m]:
+                # generate tensors to store results from other processes
+                # ret_merge_rank[m][key] = [torch.zeros(*[size, ] + sh, dtype=torch.float32) for size in rank_split_sizes]
+                # torch.distributed.gather(ret_merge_chunk[m][key], ret_merge_rank[m][key])
+                # ret_merge_rank[m][key] = torch.cat(ret_merge_rank[m][key], dim=0)
+                ret_merge_rank[m][key] = ret_merge_chunk[m][key]
                 if fixed > 0:
-                    merged = merged[:-fixed]
-                merged = merged.reshape((ray_sampler.H, ray_sampler.W, -1)).squeeze()
+                    ret_merge_rank[m][key] = ret_merge_rank[m][key][:-fixed]
+                ret_merge_rank[m][key] = ret_merge_rank[m][key].reshape(
+                    (ray_sampler.H, ray_sampler.W, -1)).squeeze()
+                # print(m, key, ret_merge_rank[m][key].shape)
+    else:  # send results to main process
+        pass
+        # for m in range(len(ret_merge_chunk)):
+        #     for key in ret_merge_chunk[m]:
+        #         torch.distributed.gather(ret_merge_chunk[m][key])
 
-                if ret_merge_rank is None:
-                    ret_merge_rank = [OrderedDict() for _ in range(len(ret_merge_chunk))]
-                ret_merge_rank[m][key] = merged
-
-    # 只有 rank0 返回
+    # only rank 0 program returns
     if rank == 0:
         return ret_merge_rank
     else:
         return None
-

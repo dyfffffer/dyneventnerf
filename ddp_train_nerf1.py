@@ -5,7 +5,8 @@ from collections import OrderedDict
 
 import numpy as np
 import torch
-import torch.optim
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.cuda.amp import autocast, GradScaler
 from torch.profiler import profile, record_function, ProfilerActivity
 from tensorboardX import SummaryWriter
@@ -16,13 +17,16 @@ from utils import img2mse, mse2psnr, img_HWC2CHW, colorize
 from data_loader_split import load_event_data_split
 from nerf_sample_ray_split import CameraManager
 from ddp_sampling import intersect_cylinder, intersect_sphere, perturb_samples, sample_pdf
-from DynEventNeRF.render_single_image_0 import render_single_image
+from render_single_image import render_single_image
 from create_nerf import create_nerf
 from tonemapping import Gamma22, EventLogSpace
 
 
+# -------------------------------
+# log_view_to_tb() 和 get_sample_sizes() 保持不变
+# -------------------------------
+
 def log_view_to_tb(writer, global_step, log_data, gt_events, gt_rgb, mask, prefix=''):
-    # rgb_im = img_HWC2CHW(torch.from_numpy(gt_img))
     events_im = img_HWC2CHW(torch.from_numpy(gt_events))
     events_im = (events_im)/40+0.5
     writer.add_image(prefix + 'events_gt', events_im, global_step)
@@ -31,43 +35,32 @@ def log_view_to_tb(writer, global_step, log_data, gt_events, gt_rgb, mask, prefi
     writer.add_image(prefix + 'rgb_gt', rgb_im, global_step)
 
     for m in range(len(log_data)):
-        # rgb_im = img_HWC2CHW(log_data[m]['rgb'])
-        # rgb_im = torch.clamp(rgb_im, min=0., max=1.)  # just in case diffuse+specular>1
-        # writer.add_image(prefix + 'level_{}/rgb'.format(m), rgb_im, global_step)
-
         rgb_im = img_HWC2CHW(Gamma22.from_linear(log_data[m]['rgb_linear']))
-        writer.add_image(prefix + 'level_{}/rgb_norm'.format(m), (rgb_im-rgb_im.min(2, True)[0].min(1, True)[0])/(0.001+rgb_im.max(2,True)[0].max(1,True)[0]-rgb_im.min(2,True)[0].min(1,True)[0]), global_step)
-        rgb_im = torch.clamp(rgb_im, min=0., max=1.)  # just in case diffuse+specular>1
-        writer.add_image(prefix + 'level_{}/rgb'.format(m), rgb_im, global_step)
+        writer.add_image(prefix + f'level_{m}/rgb_norm',
+                         (rgb_im-rgb_im.min(2, True)[0].min(1, True)[0])/(0.001+rgb_im.max(2,True)[0].max(1,True)[0]-rgb_im.min(2,True)[0].min(1,True)[0]),
+                         global_step)
+        rgb_im = torch.clamp(rgb_im, min=0., max=1.)
+        writer.add_image(prefix + f'level_{m}/rgb', rgb_im, global_step)
 
         rgb_im = img_HWC2CHW(Gamma22.from_linear(log_data[m]['fg_rgb_linear']))
-        writer.add_image(prefix + 'level_{}/fg_rgb_norm'.format(m), (rgb_im-rgb_im.min(2, True)[0].min(1, True)[0])/(0.001+rgb_im.max(2,True)[0].max(1,True)[0]-rgb_im.min(2,True)[0].min(1,True)[0]), global_step)
-        rgb_im = torch.clamp(rgb_im, min=0., max=1.)  # just in case diffuse+specular>1
-        writer.add_image(prefix + 'level_{}/fg_rgb'.format(m), rgb_im, global_step)
+        writer.add_image(prefix + f'level_{m}/fg_rgb_norm',
+                         (rgb_im-rgb_im.min(2, True)[0].min(1, True)[0])/(0.001+rgb_im.max(2,True)[0].max(1,True)[0]-rgb_im.min(2,True)[0].min(1,True)[0]),
+                         global_step)
+        rgb_im = torch.clamp(rgb_im, min=0., max=1.)
+        writer.add_image(prefix + f'level_{m}/fg_rgb', rgb_im, global_step)
 
         depth = log_data[m]['fg_depth']
-        depth_im = img_HWC2CHW(colorize(depth, cmap_name='jet', append_cbar=True,
-                                        mask=mask))
-        writer.add_image(prefix + 'level_{}/fg_depth'.format(m), depth_im, global_step)
+        depth_im = img_HWC2CHW(colorize(depth, cmap_name='jet', append_cbar=True, mask=mask))
+        writer.add_image(prefix + f'level_{m}/fg_depth', depth_im, global_step)
 
         if 'fg_ldist' in log_data[m]:
             ldist = log_data[m]['fg_ldist']
-            ldist_im = img_HWC2CHW(colorize(ldist, cmap_name='jet', append_cbar=True,
-                                            mask=mask))
-            writer.add_image(prefix + 'level_{}/fg_ldist'.format(m), ldist_im, global_step)
+            ldist_im = img_HWC2CHW(colorize(ldist, cmap_name='jet', append_cbar=True, mask=mask))
+            writer.add_image(prefix + f'level_{m}/fg_ldist', ldist_im, global_step)
 
-        # rgb_im = img_HWC2CHW(log_data[m]['bg_rgb'])
-        # rgb_im = torch.clamp(rgb_im, min=0., max=1.)  # just in case diffuse+specular>1
-        # writer.add_image(prefix + 'level_{}/bg_rgb'.format(m), rgb_im, global_step)
-        # depth = log_data[m]['bg_depth']
-        # depth_im = img_HWC2CHW(colorize(depth, cmap_name='jet', append_cbar=True,
-        #                                 mask=mask))
-        # writer.add_image(prefix + 'level_{}/bg_depth'.format(m), depth_im, global_step)
         bg_lambda = log_data[m]['bg_lambda']
-        bg_lambda_im = img_HWC2CHW(colorize(bg_lambda, cmap_name='hot', append_cbar=True,
-                                            mask=mask))
-        writer.add_image(prefix + 'level_{}/bg_lambda'.format(m), bg_lambda_im, global_step)
-
+        bg_lambda_im = img_HWC2CHW(colorize(bg_lambda, cmap_name='hot', append_cbar=True, mask=mask))
+        writer.add_image(prefix + f'level_{m}/bg_lambda', bg_lambda_im, global_step)
 
 def get_sample_sizes(total, split_count):
     overhead = total % split_count
@@ -79,9 +72,31 @@ def get_sample_sizes(total, split_count):
     return sizes
 
 
-def ddp_train_nerf(rank, args):
+# -------------------------------
+# DDP 修改：传入 local_rank，初始化分布式
+# -------------------------------
+def ddp_train_nerf(local_rank, args):
+    print(f"=== Rank {local_rank} starting ===")
+    
+    rank = local_rank
+    torch.cuda.set_device(rank)
+    
+    # 关键修改：只在 world_size > 1 时初始化 DDP
+    if args.world_size > 1:
+        dist.init_process_group(
+            backend='nccl',
+            init_method='env://',
+            rank=rank,
+            world_size=args.world_size
+        )
+        print(f"Rank {rank}: DDP initialized")
+    else:
+        print(f"Rank {rank}: Running without DDP")
+    
+    
+    
     ###### decide chunk size according to gpu memory
-    logger.info('gpu_mem: {}'.format(torch.cuda.get_device_properties(rank).total_memory))
+    logger.info(f'Rank {rank} gpu_mem: {torch.cuda.get_device_properties(rank).total_memory}')
     if torch.cuda.get_device_properties(rank).total_memory / 1e9 > 14:
         logger.info('setting batch size according to 24G gpu')
         args.N_rand = 1024
@@ -92,22 +107,21 @@ def ddp_train_nerf(rank, args):
         args.chunk_size = 4096
     else:
         logger.info('setting batch size according to 4G gpu')
-        args.N_rand = 512//4
-        args.chunk_size = 4096//4
+        args.N_rand = 512 // 4
+        args.chunk_size = 4096 // 4
 
-    ###### Create log dir and copy the config file
+    ###### Create log dir and copy the config file (only rank 0)
     if rank == 0:
         os.makedirs(os.path.join(args.basedir, args.expname), exist_ok=True)
         f = os.path.join(args.basedir, args.expname, 'args.txt')
         with open(f, 'w') as file:
             for arg in sorted(vars(args)):
                 attr = getattr(args, arg)
-                file.write('{} = {}\n'.format(arg, attr))
+                file.write(f'{arg} = {attr}\n')
         if args.config is not None:
             f = os.path.join(args.basedir, args.expname, 'config.txt')
             with open(f, 'w') as out_file, open(args.config, 'r') as inp_file:
                 out_file.write(inp_file.read())
-    # torch.distributed.barrier()
 
     camera_mgr = CameraManager(learnable=False)
     ray_samplers = load_event_data_split(args.datadir, args.scene, camera_mgr=camera_mgr, split=args.train_split,
@@ -117,41 +131,44 @@ def ddp_train_nerf(rank, args):
                                          damping_strength=args.damping_strength,
                                          tstart=args.tstart, tend=args.tend,
                                          is_rgb_only=args.is_rgb_only)
-    # TODO: ray jitter should be off for the testing (if det is requested)
-    # it is off anyway because validation uses render_single_image that ignores the jitter
     val_ray_samplers = load_event_data_split(args.datadir, args.scene, camera_mgr=camera_mgr, split='validation',
                                          skip=args.testskip,
                                          use_ray_jitter=args.use_ray_jitter,
                                          polarity_offset=args.polarity_offset,
                                          damping_strength=args.damping_strength,
                                          is_rgb_only=args.is_rgb_only)
-                                        #  tstart=args.tstart, tend=args.tend)
-                                        # todo
 
-
-    ###### create network and wrap in ddp; each process should do this
+    ###### create network
     start, models = create_nerf(rank, args, camera_mgr, use_lr_scheduler=args.use_lr_scheduler)
-    # start, models = create_nerf(rank, args, camera_mgr, load_camera_mgr=False, load_optimizer=False)
+    net = models['net'].to(rank)
 
-    ##### important!!!
-    # make sure different processes sample different rays
-    np.random.seed((rank + 1) * 777+args.seed_offset)
-    # make sure different processes have different perturbations in depth samples
-    torch.manual_seed((rank + 1) * 777+args.seed_offset)
+    # 创建 CRF 网络
+    crf_net = models['crf_net'].to(rank)
+
+    
+    # wrap DDP
+    if args.world_size > 1:
+        net = DDP(net, device_ids=[rank], output_device=rank, find_unused_parameters=True)
+        models['net'] = net
+        crf_net = DDP(crf_net, device_ids=[rank], output_device=rank)
+        models['crf_net'] = crf_net
+
+    ##### seeds
+    np.random.seed((rank + 1) * 777 + args.seed_offset)
+    torch.manual_seed((rank + 1) * 777 + args.seed_offset)
 
     ##### only main process should do the logging
     if rank == 0:
         writer = SummaryWriter(os.path.join(args.basedir, args.expname))
 
     scaler = GradScaler()
-    # start training
-    what_val_to_log = 0  # helper variable for parallel rendering of a image
+    what_val_to_log = 0
     what_train_to_log = 0
 
     for i in trange(len(ray_samplers)):
         ray_samplers[i].update_rays(models['camera_mgr'])
 
-    # for global_step in range(start + 1, start + 1 + args.N_iters):
+    # 训练循环保持原来的实现
     for global_step in range(start + 1, args.N_iters):
         time0 = time.time()
         scalars_to_log = OrderedDict()
@@ -206,9 +223,16 @@ def ddp_train_nerf(rank, args):
                 ray_batch_combined[key] = ray_batches[key]
 
         # print(ray_batch_combined)
+        # 假设 crf_net 已在上部创建并 to(rank)，且可能被 DDP 包裹
+        if 'sRGB' in ray_batch_combined and ray_batch_combined['sRGB'] is not None:
+            warmup = getattr(args, 'crf_warmup', getattr(args, 'warmup', 0))
+            skip_crf = (global_step < warmup)
+            # ray_batch_combined['rgb_srgb'] 已是 tensor 且在 device 上
+            # 确认 CRF 前向参与了 loss
+            crf_out= crf_net(ray_batch_combined['sRGB'], skip_learn=skip_crf)
+            crf_out.retain_grad()
 
-        # breakpoint()
-        # 1/0
+            ray_batch_combined['rgb_linear'] = crf_out
 
         ray_batch = ray_batch_combined
         # forward and backward
@@ -227,8 +251,14 @@ def ddp_train_nerf(rank, args):
             else:
                 net.unfreeze_backend()
         else:
-            net.freeze_transform()
-            net.unfreeze_backend()
+            # 方法1：通过 net.module 访问原始模型
+            if hasattr(net, 'module'):  # 如果是DDP包装的
+                net.module.freeze_transform()
+                net.module.unfreeze_backend()
+            else:  # 如果不是DDP（单卡模式）
+                net.freeze_transform()
+                net.unfreeze_backend()
+            
 
         optim.zero_grad()
 
@@ -448,12 +478,8 @@ def ddp_train_nerf(rank, args):
                     scalars_to_log['level_{}/trf_tv'.format(m)] = trf_tv.item()
 
             scaler.scale(loss).backward()
-            # for pgi, pg in enumerate(optim.param_groups):
-            #     for pi, p in enumerate(pg['params']):
-            #         scalars_to_log['level_{}_grad_norm/{}_{}'.format(m, pgi, pi)] = torch.mean(p.grad**2)**0.5
 
-            # # clean unused memory
-            # torch.cuda.empty_cache()
+            print(crf_out.grad is None, crf_out.grad.abs().mean().item() if crf_out.grad is not None else None)
 
         scaler.step(optim)
         scaler.update()
@@ -530,31 +556,35 @@ def ddp_train_nerf(rank, args):
 
             torch.save(to_save, fpath)
 
+    # 分布式结束
+    if args.world_size > 1:
+        dist.destroy_process_group()
+
 
 def train():
     parser = config_parser()
+
     args = parser.parse_args()
+
     if 'SLURM_JOB_ID' in os.environ:
         args.slurmjob = os.environ['SLURM_JOB_ID']
+
     logger.info(parser.format_values())
-    args.world_size = 1
 
-    # with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], record_shapes=True, with_stack=True) as prof:
-    #     try:
-    #         ddp_train_nerf(0, args)
-    #     except KeyboardInterrupt:
-    #         logger.warning('Keyboard interrupt received, shutting down...')
-    #         pass
-    # print(prof.key_averages().table(sort_by="cpu_time_total", row_limit=10))
-    # print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
-    # prof.export_chrome_trace("trace.json")
-    # prof.export_stacks("profiler_stacks_cuda.txt", "self_cuda_time_total")
-    # prof.export_stacks("profiler_stacks_cpu.txt", "self_cpu_time_total")
-    ddp_train_nerf(0, args)
-
+    # 改为从环境变量获取，而不是从参数
+    local_rank = int(os.environ.get('LOCAL_RANK', 0))
+    world_size = int(os.environ.get('WORLD_SIZE', 1))
+    
+    args.local_rank = local_rank
+    args.world_size = world_size  # 重要：使用环境变量的 world_size
+    
+    print(f"Starting: rank={local_rank}, world_size={world_size}, pid={os.getpid()}")
+    
+    ddp_train_nerf(local_rank, args)
 
 
 
 if __name__ == '__main__':
+
     setup_logger()
     train()

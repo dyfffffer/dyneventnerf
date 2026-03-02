@@ -38,7 +38,7 @@ set -x
 
 
 # all remaining sequences
-# ./run.py -o output/24-04-29_59_69_5fps_ls0.5_3e-2/train -c input/2024-04-29/cameras.calib -a ../rec/24-04-29/dvSaveExt-rec-2024_04_29_18_06_30.aedat4 --t0 1714406790288158 -s 59 -e 69 -b 110 -r 5
+./run.py -o /data/dyf/DATA/DynEventnerf/output/24-04-29_59_69_5fps_ls0.5_3e-2/train -c input/2024-04-29/cameras.calib -a /data/dyf/DATA/DynEventnerf/raw/rec/24-04-29/dvSaveExt-rec-2024_04_29_18_06_30.aedat4 --t0 1714406790288158 -s 59 -e 69 -b 110 -r 5
 # ./run.py -o output/24-04-29_114_124_5fps_ls0.5_3e-2/train -c input/2024-04-29/cameras.calib -a ../rec/24-04-29/dvSaveExt-rec-2024_04_29_18_06_30.aedat4 --t0 1714406790288158 -s 114 -e 124 -b 110 -r 5
 # ./run.py -o output/24-04-29_165_170_5fps_ls0.5_3e-2/train -c input/2024-04-29/cameras.calib -a ../rec/24-04-29/dvSaveExt-rec-2024_04_29_18_06_30.aedat4 --t0 1714406790288158 -s 165 -e 170 -b 110 -r 5
 
@@ -82,5 +82,5 @@ set -x
 
 # ./run.py -o output/24-04-30_200_205_200fps_ls0.5_3e-2/train -c input/2024-04-30/cameras.calib -a ../rec/24-04-30/dvSaveExt-rec-2024_04_30_16_47_30.aedat4 --t0 1714488450074116 -s 200 -e 205 -b 10 -r 200
 # ./run.py -o output/24-04-30_314_319_200fps_ls0.5_3e-2/train -c input/2024-04-30/cameras.calib -a ../rec/24-04-30/dvSaveExt-rec-2024_04_30_16_47_30.aedat4 --t0 1714488450074116 -s 314 -e 319 -b 10 -r 200
-./run.py -o output/24-04-30_80_90_400fps_ls0.5_3e-2/train -c input/2024-04-30/cameras.calib -a ../rec/24-04-30/dvSaveExt-rec-2024_04_30_16_47_30.aedat4 --t0 1714488450074116 -s 80 -e 90 -b 10 -r 100
-./run.py -o output/24-04-30a_207_168_400fps_ls0.5_3e-2/train -c input/2024-04-30/cameras.calib -a ../rec/24-04-30/dvSaveExt-rec-2024_04_30_17_02_49.aedat4 --t0 1714489369704426 -s 207 -e 217 -b 10 -r 100
+# ./run.py -o /data/dyf/DATA/DynEventnerf/24-04-30_80_90_400fps_ls0.5_3e-2/train -c /data/dyf/DATA/DynEventnerf/raw/shot_calib_002/cameras.calib -a /data/dyf/DATA/DynEventnerf/raw/rec/24-04-30/dvSaveExt-rec-2024_04_30_16_25_08.aedat4 --t0 1714488450074116 -s 80 -e 90 -b 10 -r 100
+# ./run.py -o output/24-04-30a_207_168_400fps_ls0.5_3e-2/train -c input/2024-04-30/cameras.calib -a ../rec/24-04-30/dvSaveExt-rec-2024_04_30_17_02_49.aedat4 --t0 1714489369704426 -s 207 -e 217 -b 10 -r 100

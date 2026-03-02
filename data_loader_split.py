@@ -41,7 +41,9 @@ def find_files_per_frames(dir_, exts, tstart=None, tend=None):
     assert os.path.isdir(dir_)
     views_per_frame = []
     for frame in os.listdir(dir_):
+        # print(frame)
         frame_number = int(frame)
+        
         if tstart is not None and frame_number < tstart:
             continue
         if tend is not None and frame_number > tend:
@@ -83,6 +85,7 @@ def load_event_data_split(basedir, scene, split, camera_mgr, skip=1, view_filter
     split_dir = '{}/{}/{}'.format(basedir, scene, split)
 
     print(split_dir)
+
     # camera parameters files
     intrinsics_files = find_files('{}/intrinsics'.format(split_dir), exts=['*.txt'])
     pose_files = find_files('{}/pose'.format(split_dir), exts=['*.txt'])
@@ -96,11 +99,14 @@ def load_event_data_split(basedir, scene, split, camera_mgr, skip=1, view_filter
     # event file
     event_files = find_files('{}/events'.format(split_dir), exts=['*.npz'])
     event_files = event_files[::skip]
-    print(event_files)
+    # print(event_files)
     assert len(event_files) == cam_cnt, f'len(event_files)={len(event_files)} != cam_cnt={cam_cnt}'
 
     # img files
-    img_files = find_files_per_frames('{}/rgb'.format(split_dir), exts=['*.png', '*.jpg', '*.JPG', '*.PNG'],
+    # print(split_dir)
+    
+
+    img_files = find_files_per_frames('{}/rgb/'.format(split_dir), exts=['*.png', '*.jpg', '*.JPG', '*.PNG'],
                                       tstart=tstart, tend=tend)
     if len(img_files) > 0:
         logger.info('raw img_files: {}'.format(len(img_files)))
