@@ -124,35 +124,13 @@ def get_rays_single_image(H, W, intrinsics, c2w):
 
     pixels = torch.stack((u, v, torch.ones_like(u)), axis=0)  # (3, H*W)
 
-    # print("==== Debug ====")
-    # # import torch
-    # print("intrinsics dtype, device, shape, contiguous, anynan:",
-    #     intrinsics.dtype, intrinsics.device, intrinsics.shape, intrinsics.is_contiguous(), torch.isnan(intrinsics).any().item())
-    # print("c2w dtype, device, shape, contiguous, anynan:",
-    #     c2w.dtype, c2w.device, c2w.shape, c2w.is_contiguous(), torch.isnan(c2w).any().item())
+    device = c2w.device
 
-    # A = intrinsics[:3, :3]
-    # B = c2w[:3, :3]
-    # print("A dtype, device, shape, contiguous:", A.dtype, A.device, A.shape, A.is_contiguous())
-    # print("B dtype, device, shape, contiguous:", B.dtype, B.device, B.shape, B.is_contiguous())
-    # print("c2w[:3, :3]", c2w[:3, :3])
-    # print("intrinsics[:3, :3]", intrinsics[:3, :3])
-    # print("torch.inverse(intrinsics[:3, :3])", torch.inverse(intrinsics[:3, :3]))
+    R = c2w[:3, :3].detach().cpu().float().contiguous()
+    K = intrinsics[:3, :3].detach().cpu().float().contiguous()
 
-    # print("===========\n")
-
-
-    # R = c2w[:3, :3].detach().cpu()
-    # K = intrinsics[:3, :3].detach().cpu()
-    # Kinv = torch.linalg.inv(K)
-
-    # ray_matrix = (R @ Kinv).to(c2w.device)
-
-
-
-    ray_matrix = torch.matmul(c2w[:3, :3], torch.inverse(intrinsics[:3, :3]))
-    # rays_d = np.dot(np.linalg.inv(intrinsics[:3, :3]), pixels)
-    # rays_d = np.dot(c2w[:3, :3], rays_d)  # (3, H*W)
+    ray_matrix = (R @ torch.inverse(K)).to(device)
+    # ray_matrix = torch.matmul(c2w[:3, :3], torch.inverse(intrinsics[:3, :3]))
     rays_d = torch.matmul(ray_matrix, pixels)  # (3, H*W)
     rays_d = rays_d.transpose(1, 0)  # (H*W, 3)
 

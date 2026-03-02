@@ -23,6 +23,7 @@
 # pip install aedat==2.0.3 blinker==1.9.0 bracex==2.5.post1 dv==1.0.10 lz4==4.0.0 markupsafe==3.0.2 orderedattrdict==1.6.0 panwid==0.3.5 pymarchingcubes==0.0.2 pymcubes==0.1.2 pynvim==0.4.3 raccoon==3.0.0 roma==1.4.2 tabulate==0.8.9
 
 export CUDA_VISIBLE_DEVICES=0,1
+unset LD_LIBRARY_PATH
 
 # 单GPU
 # export common="--train_split train_0 --N_iters 150001 --N_anneal_lambda 30000 --use_lr_scheduler False --event_threshold 0.5 --tstart 0 --tend 1000 --neg_ratio 0.9 --tonemap_eps 1e-2 --use_viewdirs False --damping_strength 1.0"
@@ -41,10 +42,10 @@ export base="--config configs/mlp2_lambda1e-3.txt --lrate 1e-4 --max_freq_log2_p
 export fullmodel="${base} --lambda_reg 1e-2"
 export scene=lego_dyn2
 export sceneargs=""
-tensorboard --logdir="/data/dyf/DATA/DynEventnerf/logs/exp_${scene}" --port=6006 &
+tensorboard --logdir="/data/dyf/DATA/DynEventnerf/logs/testcrf_${scene}" --port=6006 &
 
 torchrun --nproc_per_node=2 --master_port=12345 ./ddp_train_nerf1.py \
-    --expname exp_${scene} \
+    --expname testcrf_${scene} \
     --scene dynsyn/${scene} \
     $common $sceneargs $fullmodel
 
