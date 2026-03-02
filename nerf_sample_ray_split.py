@@ -298,8 +298,11 @@ class RaySamplerSingleEventStream:
                     
                     # rgb_linear = crf(sRGB, skip_learn=iteration<opt.warmup)
                     self.sRGB.append((frame_number, sRGB))
+                # keep backwards-compatible alias used in multiple call sites
+                self.rgbs_linear = self.sRGB
             else:
                 self.sRGB = None
+                self.rgbs_linear = None
 
         self.rays_o, self.rays_d, self.depth, self.ray_matrix = None, None, None, None
 
@@ -470,7 +473,7 @@ class RaySamplerSingleEventStream:
         #     ref_rgb_linear = None
         
         if self.sRGB is not None:
-            sRGB = sRGB[select_inds, :]          # [N_rand, 3], or [N_rand, 1]
+            sRGB = ref_rgb_linear[select_inds, :]          # [N_rand, 3], or [N_rand, 1]
         else:
             sRGB = None
 
