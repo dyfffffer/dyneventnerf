@@ -205,6 +205,8 @@ def config_parser(config_path=None):
 
     # learning rate options
     parser.add_argument("--lrate", type=float, default=5e-4, help='learning rate')
+    parser.add_argument("--crf_lrate", type=float, default=5e-4,
+                        help='learning rate for CRF network parameters')
     parser.add_argument("--lrate_decay_factor", type=float, default=0.1,
                         help='decay learning rate by a factor every specified number of steps')
     parser.add_argument("--lrate_decay_steps", type=int, default=5000,
