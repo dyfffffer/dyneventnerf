@@ -222,7 +222,7 @@ def ddp_train_nerf(local_rank, args):
                 # pass through the list
                 ray_batch_combined[key] = ray_batches[key]
 
-        # print(ray_batch_combined)
+        crf_out = None
         # 假设 crf_net 已在上部创建并 to(rank)，且可能被 DDP 包裹
         if 'sRGB' in ray_batch_combined and ray_batch_combined['sRGB'] is not None:
             warmup = getattr(args, 'crf_warmup', getattr(args, 'warmup', 0))
@@ -263,38 +263,59 @@ def ddp_train_nerf(local_rank, args):
             
 
         optim.zero_grad()
+        total_loss = None
 
+        '''
+        最核心的训练循环部分
+        级连（coarse-to-fine）采样+渲染+多损失优化
+        采样深度、前向渲染、构造监督信号、组装总loss、反向传播、优化器更新、学习率调度器更新
+        这里对start end ref分别进行了采样
+
+        为什么要 cascade_level：coarse-to-fine 的层级渲染？
+        m=0（coarse）：用均匀采样在近远平面间取一串深度点，快速得到一个粗糙的密度/颜色分布
+        m>0（fine）：利用上一层输出的 fg_weights（体渲染的权重）做重要性采样（PDF sampling），把采样点集中到更可能有表面/结构的深度区域。
+
+        为什么有 start / end / ref 三次 forward？
+        这是一种“事件监督常见结构”：start/end：用来构造曝光窗口内的亮度变化
+        ref：用来做 RGB 监督（某一参考时刻的清晰帧）
+
+        '''
         for m in range(models['cascade_level']):
             with autocast():
                 # sample depths
                 N_samples = models['cascade_samples'][m]
                 if m == 0:
                     # foreground depth
-
+                    # 先算每条 ray 的近远交点（sphere/cylinder），得到一个初始的深度范围；在训练时对这个范围均匀采样，在测试时直接用这个范围的端点；后续层级再基于这个范围做重要性采样
                     ray_o = ray_batch['ray_o']
                     ray_d = ray_batch['ray_d']
-                    fg_far_depth = intersect_sphere(ray_o, ray_d)  # [...,]
-                    fg_near_depth = ray_batch['min_depth']  # [..., ]
+                    fg_far_depth = intersect_sphere(ray_o, ray_d)  # 球体包围的远端交点
+                    fg_near_depth = ray_batch['min_depth']  # 近端交点（可能是预设的最小深度，或者是某个包围盒的近端交点）
 
                     # ray_o, ray_d = bound_transform.inverse(ray_o, ray_d)
 
                     # ----
+                    # 得到圆柱体裁剪的 near/far交点，进一步裁剪深度范围
+                    # 这一步是在做空间裁剪：只在你关心的几何区域内采样，减少空区域浪费。
                     fg_near_depth_cyl, fg_far_depth_cyl = intersect_cylinder(ray_o, ray_d, args.crop_r, args.crop_y_min, args.crop_y_max)
                     assert fg_far_depth_cyl.shape == fg_far_depth_cyl.shape
                     assert fg_near_depth_cyl.shape == fg_near_depth_cyl.shape
 
                     fg_near_depth = torch.maximum(fg_near_depth, fg_near_depth_cyl)
                     fg_far_depth = torch.minimum(fg_far_depth, fg_far_depth_cyl)
+                    
                     # ----
-
+                    # 在 [near, far] 上均匀取 N 个深度点，再加随机扰动（训练时常用，减少 aliasing）。测试时可以不扰动，直接用均匀点。
                     step = (fg_far_depth - fg_near_depth) / (N_samples - 1)
                     fg_depth = torch.stack([fg_near_depth + i * step for i in range(N_samples)], dim=-1)  # [..., N_samples]
                     fg_depth = perturb_samples(fg_depth)  # random perturbation during training
 
+                    # 把同一组 fg_depth 复制给 start/end/ref 三个时间点
                     fg_depth_start = fg_depth
                     fg_depth_end = fg_depth
                     fg_depth_ref = fg_depth
 
+                # pdf重要性采样
                 else:
                     if not args.is_rgb_only:
                         # sample pdf and concat with earlier samples
@@ -351,12 +372,11 @@ def ddp_train_nerf(local_rank, args):
                 event_mask = mask_gt
                 eps = args.tonemap_eps
 
+                # event loss
                 if not args.is_rgb_only:
                     start_log = EventLogSpace.from_linear(ret_start['rgb_linear'], eps)
                     end_log = EventLogSpace.from_linear(ret_end['rgb_linear'], eps)
-
                     diff = end_log - start_log
-
                     diff = diff * color_mask
                     events_gt = events_gt * color_mask
 
@@ -368,8 +388,8 @@ def ddp_train_nerf(local_rank, args):
                     event_random_loss = torch.zeros(1)
 
                 # assert mask_gt is None
+                # ref_rgb_loss：参考时刻渲染 vs 参考时刻 GT
                 ref_rgb_gt_linear = ray_batch['rgb_linear'].to(rank)
-
                 ref_rgb_render_linear = ret_ref['rgb_linear']
 
                 if ref_rgb_gt_linear.shape[-1] == 1:
@@ -381,9 +401,9 @@ def ddp_train_nerf(local_rank, args):
                 ref_rgb_loss = img2mse(ref_rgb_render_linear, ref_rgb_gt_linear, mask=mask_gt)
                 # ref_rgb_loss = 0.
 
+                # ref_acc_loss：从 ref 积分到 end 的一致性
                 if not args.is_rgb_only:
                     ref_rgb_gt_log = EventLogSpace.from_linear(ref_rgb_gt_linear, eps)
-
                     events_from_ref_to_end_gt = ray_batch['events_from_ref_to_end']
                     end_rgb_gt_log = (ref_rgb_gt_log + events_from_ref_to_end_gt * THR)
                     ref_acc_loss = img2mse(end_log * color_mask, end_rgb_gt_log * color_mask, mask=mask_gt)
@@ -407,6 +427,7 @@ def ddp_train_nerf(local_rank, args):
                 # loss = img2mse(ret['rgb'], rgb_gt)
                 # loss = img2mse(ret['rgb'], (diff_gt-diff_gt.min())/(diff_gt.max()-diff_gt.min()))
 
+                # 鼓励深度分布更紧凑/更合理
                 if args.use_ldist_reg:
                     ldist = 0.
                     for ret in all_rets:
@@ -414,6 +435,7 @@ def ddp_train_nerf(local_rank, args):
                         ldist = ldist + ret['fg_ldist'].mean()
                     loss = loss + ldist * args.ldist_reg
 
+                # 平滑正则
                 if args.use_tv_reg:
                     tv = 0.
                     for ret in all_rets:
@@ -421,6 +443,7 @@ def ddp_train_nerf(local_rank, args):
                         tv = tv + ret['fg_tv'].mean()
                     loss = loss + tv * args.tv_reg
 
+                # Tensorf 稀疏/平滑/TV 等
                 if args.use_tensorf_sparsity:
                     if global_step >= args.tensorf_sparsity_startit:
                         trf_reg = net.fg_net.get_sparsity_reg()  # todo: ugly
@@ -437,17 +460,12 @@ def ddp_train_nerf(local_rank, args):
                     loss = loss + trf_tv * args.tensorf_tv
 
                 # sparsify as much as possible
+                # 直观上是“让背景/空域更稀疏、更干净”，并用 lambda_reg_factor = 1-exp(-step/anneal) 做退火，训练越往后正则越强
                 lambda_loss = 0.
                 for ret in all_rets:
-                # for ret in [ret_start, ret_end]:
                     bg_lambda = ret['bg_lambda'] #.mean()
                     lambda_loss = lambda_loss + (1-bg_lambda).mean() #todo: why is it mean() here as well?
-                    # lambda_loss = lambda_loss + torch.log(torch.clamp(1-bg_lambda, min=1e-4)).mean()
-                    # lambda_loss = lambda_loss + lambda_loss + torch.log(torch.clamp(bg_lambda, min=1e-4)).mean()
-                    # lambda_loss = lambda_loss + ((1-bg_lambda)**2).mean()
-                # lambda_reg_factor = 0. if global_step < 4000 else 1.
                 lambda_reg_factor = 1-np.exp(-global_step/args.N_anneal_lambda)
-                # lambda_reg_factor = 1.
                 loss = loss + args.lambda_reg * lambda_reg_factor * lambda_loss
 
                 # scalars_to_log['exposure_log'.format(m)] = net.exposure_log.item()
@@ -479,8 +497,13 @@ def ddp_train_nerf(local_rank, args):
                 if args.use_tensorf_tv:
                     scalars_to_log['level_{}/trf_tv'.format(m)] = trf_tv.item()
 
-            scaler.scale(loss).backward()
-
+            # scaler.scale(loss).backward()
+            if total_loss is None:
+                total_loss = loss
+            else:
+                total_loss = total_loss + loss
+        scaler.scale(total_loss).backward()
+        if crf_out is not None:
             print(crf_out.grad is None, crf_out.grad.abs().mean().item() if crf_out.grad is not None else None)
 
         scaler.step(optim)
