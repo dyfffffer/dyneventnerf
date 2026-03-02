@@ -223,6 +223,7 @@ def ddp_train_nerf(local_rank, args):
                 ray_batch_combined[key] = ray_batches[key]
 
         # print(ray_batch_combined)
+        crf_out = None
         # 假设 crf_net 已在上部创建并 to(rank)，且可能被 DDP 包裹
         if 'sRGB' in ray_batch_combined and ray_batch_combined['sRGB'] is not None:
             warmup = getattr(args, 'crf_warmup', getattr(args, 'warmup', 0))
@@ -261,6 +262,7 @@ def ddp_train_nerf(local_rank, args):
             
 
         optim.zero_grad()
+        total_loss = None
 
         for m in range(models['cascade_level']):
             with autocast():
@@ -477,8 +479,14 @@ def ddp_train_nerf(local_rank, args):
                 if args.use_tensorf_tv:
                     scalars_to_log['level_{}/trf_tv'.format(m)] = trf_tv.item()
 
-            scaler.scale(loss).backward()
+            if total_loss is None:
+                total_loss = loss
+            else:
+                total_loss = total_loss + loss
 
+        scaler.scale(total_loss).backward()
+
+        if crf_out is not None:
             print(crf_out.grad is None, crf_out.grad.abs().mean().item() if crf_out.grad is not None else None)
 
         scaler.step(optim)
