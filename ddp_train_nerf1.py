@@ -229,6 +229,8 @@ def ddp_train_nerf(local_rank, args):
             skip_crf = (global_step < warmup)
             # ray_batch_combined['rgb_srgb'] 已是 tensor 且在 device 上
             # 确认 CRF 前向参与了 loss
+            if rank == 0 and global_step < 5:
+                print("sRGB shape:", ray_batch_combined['sRGB'].shape, "dim:", ray_batch_combined['sRGB'].dim())
             crf_out= crf_net(ray_batch_combined['sRGB'], skip_learn=skip_crf)
             crf_out.retain_grad()
 
