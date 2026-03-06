@@ -10,7 +10,7 @@ import imageio
 from data_loader_split import load_event_data_split
 from utils import mse2psnr, colorize_np, to8b
 from ddp_config import setup_logger, logger, config_parser
-from render_single_image import render_single_image
+from DynEventNeRF.render_single_image1 import render_single_image
 from create_nerf import create_nerf
 from nerf_sample_ray_split import CameraManager
 from tonemapping import Gamma22
