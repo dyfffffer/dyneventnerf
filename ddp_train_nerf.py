@@ -21,6 +21,20 @@ from create_nerf import create_nerf
 from tonemapping import Gamma22, EventLogSpace
 
 
+def check_module_grads(module):
+    stats = {
+        'total': 0,
+        'with_grad': 0,
+        'grad_norm_sum': 0.0,
+    }
+    for _, param in module.named_parameters():
+        stats['total'] += 1
+        if param.grad is not None:
+            stats['with_grad'] += 1
+            stats['grad_norm_sum'] += param.grad.data.norm(2).item()
+    return stats
+
+
 def log_view_to_tb(writer, global_step, log_data, gt_events, gt_rgb, mask, prefix=''):
     # rgb_im = img_HWC2CHW(torch.from_numpy(gt_img))
     events_im = img_HWC2CHW(torch.from_numpy(gt_events))
@@ -452,6 +466,17 @@ def ddp_train_nerf(rank, args):
             #     for pi, p in enumerate(pg['params']):
             #         scalars_to_log['level_{}_grad_norm/{}_{}'.format(m, pgi, pi)] = torch.mean(p.grad**2)**0.5
 
+            if (
+                args.check_crf_grad
+                and 'crf_net' in models
+                and (global_step % max(1, args.check_crf_grad_every) == 0)
+            ):
+                crf_stats = check_module_grads(models['crf_net'])
+                scalars_to_log['crf_grad/params_with_grad'] = crf_stats['with_grad']
+                scalars_to_log['crf_grad/params_total'] = crf_stats['total']
+                scalars_to_log['crf_grad/ratio'] = crf_stats['with_grad'] / max(1, crf_stats['total'])
+                scalars_to_log['crf_grad/norm_sum'] = crf_stats['grad_norm_sum']
+
             # # clean unused memory
             # torch.cuda.empty_cache()
 
@@ -527,6 +552,10 @@ def ddp_train_nerf(rank, args):
 
             name = 'camera_mgr'
             to_save[name] = models[name].state_dict()
+
+            if 'crf_net' in models:
+                name = 'crf_net'
+                to_save[name] = models[name].state_dict()
 
             torch.save(to_save, fpath)
 

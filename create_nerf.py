@@ -15,6 +15,9 @@ def create_nerf(rank, args, camera_mgr, load_camera_mgr=True, load_optimizer=Tru
     # very important!!! otherwise it might introduce extra memory in rank=0 gpu
     torch.cuda.set_device(rank)
 
+    if not hasattr(args, 'crf_lrate') or args.crf_lrate is None:
+        args.crf_lrate = args.lrate
+
     models = OrderedDict()
     models['cascade_level'] = args.cascade_level
     models['cascade_samples'] = [int(x.strip()) for x in args.cascade_samples.split(',')]
@@ -104,6 +107,8 @@ def create_nerf(rank, args, camera_mgr, load_camera_mgr=True, load_optimizer=Tru
         to_load = torch.load(fpath, map_location=map_location)
 
         names = ['net']
+        if 'crf_net' in models and 'crf_net' in to_load:
+            names.append('crf_net')
         if load_optimizer:
             names.append('optim')
             names.append('lr_scheduler')
