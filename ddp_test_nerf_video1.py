@@ -10,7 +10,7 @@ import imageio
 from data_loader_split import load_event_data_split
 from utils import mse2psnr, colorize_np, to8b
 from ddp_config import setup_logger, logger, config_parser
-from DynEventNeRF.render_single_image1 import render_single_image
+from render_single_image1 import render_single_image
 from create_nerf import create_nerf
 from nerf_sample_ray_split import CameraManager
 from tonemapping import Gamma22
@@ -138,10 +138,19 @@ def ddp_test_nerf(rank, args):
             viewname = ''
 
             def write_image(image, family, fname):
-                writer = writers_by_family.setdefault(
-                    family,
-                    SequenceWriter(out_dir, f'{viewname}_{family}', args.write_video)
-                )
+                # writer = writers_by_family.setdefault(
+                #     viewname,
+                #     family,
+                #     SequenceWriter(out_dir, f'{viewname}_{family}', args.write_video)
+                # )
+                writer_key = (viewname, family)
+                if writer_key not in writers_by_family:
+                    writers_by_family[writer_key] = SequenceWriter(
+                        out_dir,
+                        f'{viewname}_{family}',
+                        args.write_video
+                    )
+                writer = writers_by_family[writer_key]
                 writer.write(image, fname)
 
             # ---------- 时间戳设置 ----------
