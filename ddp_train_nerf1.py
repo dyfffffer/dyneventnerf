@@ -17,7 +17,7 @@ from utils import img2mse, mse2psnr, img_HWC2CHW, colorize
 from data_loader_split import load_event_data_split
 from nerf_sample_ray_split import CameraManager
 from ddp_sampling import intersect_cylinder, intersect_sphere, perturb_samples, sample_pdf
-from DynEventNeRF.render_single_image1 import render_single_image
+from render_single_image1 import render_single_image
 from create_nerf import create_nerf
 from tonemapping import Gamma22, EventLogSpace
 
@@ -503,8 +503,8 @@ def ddp_train_nerf(local_rank, args):
             else:
                 total_loss = total_loss + loss
         scaler.scale(total_loss).backward()
-        if crf_out is not None:
-            print(crf_out.grad is None, crf_out.grad.abs().mean().item() if crf_out.grad is not None else None)
+        # if crf_out is not None:
+        #     print(crf_out.grad is None, crf_out.grad.abs().mean().item() if crf_out.grad is not None else None)
 
         scaler.step(optim)
         scaler.update()
