@@ -138,10 +138,14 @@ def ddp_test_nerf(rank, args):
             viewname = ''
 
             def write_image(image, family, fname):
-                writer = writers_by_family.setdefault(
-                    family,
-                    SequenceWriter(out_dir, f'{viewname}_{family}', args.write_video)
-                )
+                writer_key = (viewname, family)
+                if writer_key not in writers_by_family:
+                    writers_by_family[writer_key] = SequenceWriter(
+                        out_dir,
+                        f'{viewname}_{family}',
+                        args.write_video
+                    )
+                writer = writers_by_family[writer_key]
                 writer.write(image, fname)
 
             # ---------- 时间戳设置 ----------
