@@ -380,6 +380,14 @@ def ddp_train_nerf(local_rank, args):
                     diff = diff * color_mask
                     events_gt = events_gt * color_mask
 
+                    # optionally collapse RGB event signal to grayscale
+                    if diff.shape[-1] == 3:
+                        rgbgray = torch.tensor([0.299, 0.587, 0.114],
+                                               device=diff.device,
+                                               dtype=diff.dtype)
+                        diff = torch.sum(diff * rgbgray, dim=-1, keepdim=True)
+                        events_gt = torch.sum(events_gt * rgbgray, dim=-1, keepdim=True)
+
                     THR = args.event_threshold
                     event_loss = img2mse(diff, events_gt*THR, event_mask)
                     event_random_loss = img2mse(diff*0, events_gt*THR, event_mask)
