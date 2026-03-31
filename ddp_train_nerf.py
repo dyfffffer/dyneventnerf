@@ -320,13 +320,27 @@ def ddp_train_nerf(rank, args):
                 eps = args.tonemap_eps
 
                 if not args.is_rgb_only:
-                    start_log = EventLogSpace.from_linear(ret_start['rgb_linear'], eps)
-                    end_log = EventLogSpace.from_linear(ret_end['rgb_linear'], eps)
+                    start_linear = ret_start['rgb_linear']
+                    end_linear = ret_end['rgb_linear']
+                    event_color_mask = color_mask
+
+                    # collapse RGB to grayscale before log-domain difference
+                    if start_linear.shape[-1] == 3:
+                        rgbgray = torch.tensor([0.299, 0.587, 0.114],
+                                               device=start_linear.device,
+                                               dtype=start_linear.dtype)
+                        start_linear = torch.sum(start_linear * rgbgray, dim=-1, keepdim=True)
+                        end_linear = torch.sum(end_linear * rgbgray, dim=-1, keepdim=True)
+                        events_gt = torch.sum(events_gt * rgbgray, dim=-1, keepdim=True)
+                        event_color_mask = torch.sum(event_color_mask * rgbgray, dim=-1, keepdim=True)
+
+                    start_log = EventLogSpace.from_linear(start_linear, eps)
+                    end_log = EventLogSpace.from_linear(end_linear, eps)
 
                     diff = end_log - start_log
 
-                    diff = diff * color_mask
-                    events_gt = events_gt * color_mask
+                    diff = diff * event_color_mask
+                    events_gt = events_gt * event_color_mask
 
                     THR = args.event_threshold
                     event_loss = img2mse(diff, events_gt*THR, event_mask)
