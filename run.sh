@@ -31,22 +31,24 @@
 # export scene=lego_dyn2
 # export sceneargs=""
 # # tensorboard --logdir="/data/dyf/DATA/DynEventnerf/logs/exp_${scene}" --port=6006 &
-# tensorboard --logdir="/root/log/exp_${scene}" --port=6009 &
+# # 访问地址：localhost:6009
+# # tensorboard --logdir="/root/log/exp_${scene}" --port=6009 &
+
 
 # torchrun --nproc_per_node=2 --master_port=12345 ./ddp_train_nerf1.py \
-#     --expname exp_${scene} \
+#     --expname exp_add_gray${scene} \
 #     --scene dynsyn/${scene} \
 #     $common $sceneargs $fullmodel
 # ===========================================================
 
 
 # ======================渲染测试集=====================================
-# export x="exp_lego_dyn2"
-# torchrun --nproc_per_node=2 ddp_test_nerf_video1.py --render_split validation --write_video False --render_bullet_time False --testskip 1 --config /root/log/$x/args.txt --render_timestamp_frames 5 --render_timestamp_periods 1.25
+export x="exp_add_graylego_dyn2"
+torchrun --nproc_per_node=2 ddp_test_nerf_video1.py --render_split validation --write_video False --render_bullet_time False --testskip 1 --config /root/log/$x/args.txt --render_timestamp_frames 5 --render_timestamp_periods 1.25
 # ===========================================================
 
 
 # =======================计算指标====================================
-python metric/main.py /root/log/eval_lego_dyn2/crf1 /root/log/eval_lego_dyn2/gt
-# python metric/compssim.py /root/log/eval_lego_dyn2/nocrf_corr /root/log/eval_lego_dyn2/gt
-# python metric/complpips.py /root/log/eval_lego_dyn2/nocrf_corr /root/log/eval_lego_dyn2/gt
+# python metric/main.py /root/log/eval_lego_dyn2/fix_warm /root/log/eval_lego_dyn2/gt
+# python metric/compssim.py /root/log/eval_lego_dyn2/fix_warm_corr /root/log/eval_lego_dyn2/gt
+# python metric/complpips.py /root/log/eval_lego_dyn2/fix_warm_corr /root/log/eval_lego_dyn2/gt

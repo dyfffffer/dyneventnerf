@@ -21,6 +21,8 @@ from render_single_image1 import render_single_image
 from create_nerf import create_nerf
 from tonemapping import Gamma22, EventLogSpace
 
+RGBGRAY = torch.tensor([0.299,0.587,0.114])
+
 
 # -------------------------------
 # log_view_to_tb() 和 get_sample_sizes() 保持不变
@@ -76,6 +78,8 @@ def get_sample_sizes(total, split_count):
 # DDP 修改：传入 local_rank，初始化分布式
 # -------------------------------
 def ddp_train_nerf(local_rank, args):
+    
+    
     print(f"=== Rank {local_rank} starting ===")
     
     rank = local_rank
@@ -99,8 +103,8 @@ def ddp_train_nerf(local_rank, args):
     logger.info(f'Rank {rank} gpu_mem: {torch.cuda.get_device_properties(rank).total_memory}')
     if torch.cuda.get_device_properties(rank).total_memory / 1e9 > 14:
         logger.info('setting batch size according to 24G gpu')
-        args.N_rand = 1024
-        args.chunk_size = 8192
+        args.N_rand = 1024 # 1024 4096
+        args.chunk_size = 8192 # 8192 32768
     elif torch.cuda.get_device_properties(rank).total_memory / 1e9 > 7:
         logger.info('setting batch size according to 12G gpu')
         args.N_rand = 512
@@ -225,14 +229,16 @@ def ddp_train_nerf(local_rank, args):
         crf_out = None
         # 假设 crf_net 已在上部创建并 to(rank)，且可能被 DDP 包裹
         if 'sRGB' in ray_batch_combined and ray_batch_combined['sRGB'] is not None:
-            warmup = getattr(args, 'crf_warmup', getattr(args, 'warmup', 0))
+            warmup = getattr(args, 'crf_warmup', getattr(args, 'warmup', 1500))
             skip_crf = (global_step < warmup)
             # ray_batch_combined['rgb_srgb'] 已是 tensor 且在 device 上
             # 确认 CRF 前向参与了 loss
             if rank == 0 and global_step < 5:
                 print("sRGB shape:", ray_batch_combined['sRGB'].shape, "dim:", ray_batch_combined['sRGB'].dim())
             crf_out= crf_net(ray_batch_combined['sRGB'], skip_learn=skip_crf)
-            crf_out.retain_grad()
+            if crf_out.requires_grad:
+                crf_out.retain_grad()
+
 
             ray_batch_combined['rgb_linear'] = crf_out
 
@@ -374,13 +380,23 @@ def ddp_train_nerf(local_rank, args):
 
                 # event loss
                 if not args.is_rgb_only:
-                    start_log = EventLogSpace.from_linear(ret_start['rgb_linear'], eps)
-                    end_log = EventLogSpace.from_linear(ret_end['rgb_linear'], eps)
-                    diff = end_log - start_log
-                    diff = diff * color_mask
-                    events_gt = events_gt * color_mask
+                    
+                    # rgbgray = start_linear.new_tensor([0.299, 0.587, 0.114])
+                    start_linear = ret_start['rgb_linear']
+                    end_linear = ret_end['rgb_linear']
+                    rgbgray = RGBGRAY.to(start_linear.device)
 
+                    start_linear = torch.sum(start_linear * rgbgray, dim=-1, keepdim=True)
+                    end_linear = torch.sum(end_linear * rgbgray, dim=-1, keepdim=True)
+                    events_gt = torch.sum(events_gt * rgbgray, dim=-1, keepdim=True)
+                       
+                    start_log = EventLogSpace.from_linear(start_linear, eps)
+                    end_log = EventLogSpace.from_linear(end_linear, eps)
+
+                    diff = end_log - start_log
+                    
                     THR = args.event_threshold
+
                     event_loss = img2mse(diff, events_gt*THR, event_mask)
                     event_random_loss = img2mse(diff*0, events_gt*THR, event_mask)
                 else:
