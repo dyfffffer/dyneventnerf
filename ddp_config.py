@@ -81,6 +81,10 @@ def config_parser(config_path=None):
                         help='will load 1/N images from train sets, useful for large datasets like deepvoxels')
 
     parser.add_argument("--event_threshold", type=float, default=0.5, help='event threshold')
+    parser.add_argument("--event_temporal_slices", type=int, default=1,
+                        help='number of temporal slices for event loss (1 = original start/end loss)')
+    parser.add_argument("--event_temporal_weight", type=float, default=0.0,
+                        help='extra weight for temporal sliced event loss')
     parser.add_argument("--polarity_offset", type=float, default=0.0, help='polarity offset')
     parser.add_argument("--damping_strength", type=float, default=0.93, help='event damping strength')
 

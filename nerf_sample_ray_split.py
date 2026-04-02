@@ -392,7 +392,7 @@ class RaySamplerSingleEventStream:
         # maps [tstart, tend] frame number to [0,1]
         return (frame_number - self.tstart) / (self.tend - self.tstart)
 
-    def random_sample(self, N_rand, start_t, end_t, neg_ratio=0):
+    def random_sample(self, N_rand, start_t, end_t, neg_ratio=0, temporal_slices=1):
         '''
         :param N_rand: number of rays to be casted
         :return:
@@ -481,6 +481,18 @@ class RaySamplerSingleEventStream:
             events = None
             events_from_ref_to_end = None
 
+        if self.events is not None and temporal_slices > 1:
+            events_slices = []
+            for slice_idx in range(temporal_slices):
+                a = start_t + (end_t - start_t) * (slice_idx / temporal_slices)
+                b = start_t + (end_t - start_t) * ((slice_idx + 1) / temporal_slices)
+                event_slice = self.event_storage.accumulate(self.map_time(a), self.map_time(b)).numpy()
+                event_slice = np.tile(event_slice[..., None], (1, 1, 3)).reshape((-1, 3))
+                events_slices.append(event_slice[select_inds, :])
+            events_slices = np.stack(events_slices, axis=0)  # [K, N_rand, 3]
+        else:
+            events_slices = None
+
         # if self.rgbs_linear is not None:
         #     ref_rgb_linear = ref_rgb_linear[select_inds, :]          # [N_rand, 3], or [N_rand, 1]
         # else:
@@ -519,6 +531,7 @@ class RaySamplerSingleEventStream:
 
             ('depth', depth),
             ('events', events),
+            ('events_slices', events_slices),
             ('events_from_ref_to_end', events_from_ref_to_end),
             ('min_depth', min_depth),
 
