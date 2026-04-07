@@ -205,7 +205,12 @@ def ddp_train_nerf(local_rank, args):
         for i in range(len(ray_samplers)):
 
             # todo: should pass start time and end time
-            ray_batch = ray_samplers[i].random_sample(sizes[i], start_time, end_time, neg_ratio=current_neg_ratio)
+            # ray_batch = ray_samplers[i].random_sample(sizes[i], start_time, end_time, neg_ratio=current_neg_ratio)
+            ray_batch = ray_samplers[i].random_sample(
+                sizes[i], start_time, end_time,
+                neg_ratio=current_neg_ratio,
+                temporal_slices=max(1, args.event_temporal_slices)
+            )
             for key in ray_batch:
                 # print(key, torch.is_tensor(ray_batch[key]), ray_batch[key])
                 if torch.is_tensor(ray_batch[key]):
@@ -380,28 +385,57 @@ def ddp_train_nerf(local_rank, args):
 
                 # event loss
                 if not args.is_rgb_only:
-                    
-                    # rgbgray = start_linear.new_tensor([0.299, 0.587, 0.114])
-                    start_linear = ret_start['rgb_linear']
-                    end_linear = ret_end['rgb_linear']
-                    rgbgray = RGBGRAY.to(start_linear.device)
-
-                    start_linear = torch.sum(start_linear * rgbgray, dim=-1, keepdim=True)
-                    end_linear = torch.sum(end_linear * rgbgray, dim=-1, keepdim=True)
-                    events_gt = torch.sum(events_gt * rgbgray, dim=-1, keepdim=True)
-                       
-                    start_log = EventLogSpace.from_linear(start_linear, eps)
-                    end_log = EventLogSpace.from_linear(end_linear, eps)
-
-                    diff = end_log - start_log
-                    
+                    start_log = EventLogSpace.from_linear(ret_start['rgb_linear'], eps) 
+                    end_log = EventLogSpace.from_linear(ret_end['rgb_linear'], eps)
+                    diff = end_log - start_log 
+                    diff = diff * color_mask 
+                    events_gt = events_gt * color_mask
                     THR = args.event_threshold
-
+                    
                     event_loss = img2mse(diff, events_gt*THR, event_mask)
-                    event_random_loss = img2mse(diff*0, events_gt*THR, event_mask)
+                    event_random_loss = img2mse(diff*0, events_gt*THR, event_mask) 
+                
+                    temporal_event_loss = torch.zeros_like(event_loss)
+                    temporal_slices = max(1, args.event_temporal_slices)
+                    if temporal_slices > 1 and ray_batch['events_slices'] is not None:
+                        start_t = float(ray_batch['start_ray_t'][0].item())
+                        end_t = float(ray_batch['end_ray_t'][0].item())
+                        events_slices = ray_batch['events_slices'].to(rank)
+
+                        temporal_logs = []
+                        for k in range(temporal_slices + 1):
+                            tk = start_t + (end_t - start_t) * (k / temporal_slices)
+                            rays_t = tk * torch.ones_like(ray_batch['start_ray_t'])
+                            ret_k = net(ray_batch['ray_o'], ray_batch['ray_d'], rays_t, fg_far_depth, fg_depth_start,
+                                        ray_batch['background_linear'], global_step)
+                            rgb_k = ret_k['rgb_linear']
+                            if rgb_k.shape[-1] == 3:
+                                rgbgray = torch.tensor([0.299, 0.587, 0.114],
+                                                       device=rgb_k.device,
+                                                       dtype=rgb_k.dtype)
+                                rgb_k = torch.sum(rgb_k * rgbgray, dim=-1, keepdim=True)
+                            temporal_logs.append(EventLogSpace.from_linear(rgb_k, eps))
+
+                        for k in range(temporal_slices):
+                            events_k = events_slices[k]
+                            local_mask = event_color_mask
+                            if events_k.shape[-1] == 3:
+                                rgbgray = torch.tensor([0.299, 0.587, 0.114],
+                                                       device=events_k.device,
+                                                       dtype=events_k.dtype)
+                                events_k = torch.sum(events_k * rgbgray, dim=-1, keepdim=True)
+                                if local_mask.shape[-1] == 3:
+                                    local_mask = torch.sum(local_mask * rgbgray, dim=-1, keepdim=True)
+                            diff_k = (temporal_logs[k + 1] - temporal_logs[k]) * local_mask
+                            events_k = events_k * local_mask
+                            temporal_event_loss = temporal_event_loss + img2mse(diff_k, events_k * THR, event_mask)
+                        temporal_event_loss = temporal_event_loss / temporal_slices
+                        event_loss = event_loss + args.event_temporal_weight * temporal_event_loss
+                
                 else:
                     event_loss = torch.zeros(1)
                     event_random_loss = torch.zeros(1)
+                    temporal_event_loss = torch.zeros(1)
 
                 # assert mask_gt is None
                 # ref_rgb_loss：参考时刻渲染 vs 参考时刻 GT
@@ -487,6 +521,8 @@ def ddp_train_nerf(local_rank, args):
                 # scalars_to_log['exposure_log'.format(m)] = net.exposure_log.item()
                 scalars_to_log['level_{}/loss'.format(m)] = loss.item()
                 scalars_to_log['level_{}/event_loss'.format(m)] = event_loss.item()
+                if args.event_temporal_slices > 1:
+                    scalars_to_log['level_{}/temporal_event_loss'.format(m)] = temporal_event_loss.item()
                 scalars_to_log['level_{}/ref_rgb_loss'.format(m)] = ref_rgb_loss.item()
                 scalars_to_log['level_{}/ref_acc_loss'.format(m)] = ref_acc_loss.item()
                 scalars_to_log['level_{}/lambda_loss'.format(m)] = lambda_loss.item()
