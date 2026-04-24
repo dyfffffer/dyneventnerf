@@ -106,6 +106,34 @@ Those renderings can be combined using `tools/blend_frames1.py` or `tools/blend_
 Please find the guide on evaluation, color-correction, and computing the metrics in [`metric/README.md`](https://github.com/r00tman/DynEventNeRF/blob/main/metric/README.md).
 This folder and corresponding files will be uploaded soon.
 
+
+## Complex RGB+Event Fusion (experimental)
+
+This repository now includes a reference complex-domain fusion block in:
+- `network/ComplexBiGRU.py`
+- `network/CompEvent_arch.py`
+
+The provided `CompEventFusion` pipeline follows:
+1. build per-window event voxels,
+2. use RGB as real part and event feature as imaginary part,
+3. aggregate temporally with `ComplexBiGRU`,
+4. fuse local + frequency information with `ComplexMixer`,
+5. output per-view fused feature maps,
+6. sample fused features for NeRF projection with `sample_fused_feature_for_nerf`.
+
+It is a modular reference implementation and can be wired into your current training loop incrementally.
+
+For a project-wide end-to-end integration recipe, see `docs/complex_fusion_integration.md`.
+
+Quick smoke test: `python tools/test_complex_fusion_smoke.py`.
+
+
+### Non-complex CTA-GRU fusion variant
+
+If you prefer a non-complex fusion pipeline (3-frame RGB + 2 event windows), see:
+- `network/cta_fusion_arch.py`
+- `docs/cta_fusion_pipeline.md`
+
 ## Citation
 
 Please cite our work if you use the code.
