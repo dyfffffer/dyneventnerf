@@ -205,6 +205,8 @@ def ddp_train_nerf(local_rank, args):
 
     # 训练循环保持原来的实现
     for global_step in range(start + 1, args.N_iters):
+        torch.autograd.set_detect_anomaly(True)
+
         time0 = time.time()
         scalars_to_log = OrderedDict()
         ### Start of core optimization loop

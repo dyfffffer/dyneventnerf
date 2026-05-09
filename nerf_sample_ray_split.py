@@ -131,8 +131,6 @@ def get_rays_single_image(H, W, intrinsics, c2w):
     ray_matrix = (R @ torch.inverse(K)).to(device)
 
     # ray_matrix = torch.matmul(c2w[:3, :3], torch.inverse(intrinsics[:3, :3]))
-    print(ray_matrix.shape, ray_matrix.dtype, ray_matrix.device, ray_matrix.is_contiguous())
-    print(pixels.shape, pixels.dtype, pixels.device, pixels.is_contiguous())
     rays_d = torch.matmul(ray_matrix, pixels)  # (3, H*W)
     rays_d = rays_d.transpose(1, 0)  # (H*W, 3)
 
