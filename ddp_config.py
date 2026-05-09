@@ -68,6 +68,14 @@ def config_parser(config_path=None):
 
     parser.add_argument("--is_rgb_only", type=str2bool, default=False)
 
+    # CTA fusion (non-complex) options
+    parser.add_argument("--use_cta_fusion", type=str2bool, default=False, help='enable CTA-GRU fusion branch')
+    parser.add_argument("--cta_event_bins", type=int, default=8, help='event voxel bins for CTA branch')
+    parser.add_argument("--cta_feat_ch", type=int, default=32, help='feature width per RGB/event encoder in CTA branch')
+    parser.add_argument("--cta_loss_high_w", type=float, default=0.0, help='weight for high-frequency CTA loss')
+    parser.add_argument("--cta_loss_low_w", type=float, default=0.0, help='weight for low-frequency CTA loss')
+    parser.add_argument("--cta_warmup_iters", type=int, default=5000, help='warmup iterations for CTA loss weights')
+
     parser.add_argument("--seed_offset", type=int, default=0, help='random seed offset')
 
     # dataset options

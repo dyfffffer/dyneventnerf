@@ -25,16 +25,23 @@
 
 # ======================多GPU运行=====================================
 #  使用 torchrun 启动 DDP，每张卡一个进程
-# export scene=lego_dyn2
-# export common="--train_split train_0 --N_iters 150001 --N_anneal_lambda 30000 --use_lr_scheduler False --event_threshold 0.5 --tstart 0 --tend 1000 --neg_ratio 0.9 --tonemap_eps 1e-2 --use_viewdirs False --damping_strength 1.0"
-# export base="--config configs/mlp2_lambda1e-3.txt --lrate 1e-4 --max_freq_log2_pos 14 --max_freq_log2_time 7"
-# export fullmodel="${base} --lambda_reg 1e-2"
-# export sceneargs=""
+export CUDA_VISIBLE_DEVICES=2,3
+export scene=lego_dyn2
+export common="--train_split train_0 --N_iters 150001 --N_anneal_lambda 30000 --use_lr_scheduler False --event_threshold 0.5 --tstart 0 --tend 1000 --neg_ratio 0.9 --tonemap_eps 1e-2 --use_viewdirs False --damping_strength 1.0"
+export base="--config configs/mlp2_lambda1e-3.txt --lrate 1e-4 --max_freq_log2_pos 14 --max_freq_log2_time 7"
+export fullmodel="${base} --lambda_reg 1e-2"
+export sceneargs=""
 
-# torchrun --nproc_per_node=2 --master_port=12345 ./ddp_train_nerf1.py \
-#     --expname exp_add_tem_loss_${scene} \
-#     --scene dynsyn/${scene} \
-#     $common $sceneargs $fullmodel
+torchrun --nproc_per_node=2 --master_port=12345 ./ddp_train_nerf1.py \
+    --expname exp_add_tem_loss_${scene} \
+    --scene dynsyn/${scene} \
+    --use_cta_fusion True \
+    --cta_event_bins 8 \
+    --cta_feat_ch 32 \
+    --cta_loss_high_w 0.05 \
+    --cta_loss_low_w 0.1 \
+    --cta_warmup_iters 5000 \
+    $common $sceneargs $fullmodel
 
 ## tensorboard --logdir="/data/dyf/DATA/DynEventnerf/logs/exp_${scene}" --port=6006 &
 # # 访问地址：localhost:6009
@@ -52,4 +59,4 @@
 # =======================计算指标====================================
 # python metric/main.py /root/log/eval_lego_dyn2/add_tem_loss /root/log/eval_lego_dyn2/gt
 # python metric/compssim.py /root/log/eval_lego_dyn2/add_tem_loss_corr /root/log/eval_lego_dyn2/gt
-python metric/complpips.py /root/log/eval_lego_dyn2/add_tem_loss_corr /root/log/eval_lego_dyn2/gt
+# python metric/complpips.py /root/log/eval_lego_dyn2/add_tem_loss_corr /root/log/eval_lego_dyn2/gt

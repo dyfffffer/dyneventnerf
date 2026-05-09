@@ -124,3 +124,24 @@
 
 5. **潜在收益**
    - 对动态边缘、快速运动和事件稀疏区域，通常更容易提供稳定约束。
+
+
+
+## 如何验证（回答：不能只跑 `run.sh`）
+
+`run.sh` 当前是原始训练脚本入口，**默认不会自动验证 complex fusion 分支是否真正生效**（因为它没有显式检查 fused feature 的构建/采样链路）。
+
+建议按下面顺序验证：
+
+1. **模块级冒烟测试（必做）**
+   - `python tools/test_complex_fusion_smoke.py`
+   - 目的：确认 `CompEventFusion` 前向和 `sample_fused_feature_for_nerf` 维度/数值稳定。
+
+2. **小规模训练验证（推荐）**
+   - 用很小的 `N_iters` 跑一次训练（例如 100~500 iter），并在日志里确认你新增的 fusion 分支被调用（shape、loss、耗时）。
+   - 这一步可以沿用 `run.sh` 的命令模板，但需确保你的训练代码里已经把 fused feature 接入 NeRF 前向。
+
+3. **对照实验（最终）**
+   - baseline（不启用 fusion） vs fusion（启用）同配置对比 PSNR/LPIPS/时序一致性。
+
+一句话：`run.sh` 可以作为训练入口，但它本身**不是** complex fusion 的有效性验证脚本

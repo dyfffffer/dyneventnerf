@@ -78,7 +78,7 @@ def load_event_data_split(basedir, scene, split, camera_mgr, skip=1, view_filter
         with open(filename) as f:
             nums = f.read().split()
         return np.array([float(x) for x in nums]).reshape(shape).astype(np.float32)
-
+    print("-----",basedir)
     if basedir[-1] == '/':          # remove trailing '/'
         basedir = basedir[:-1]
 

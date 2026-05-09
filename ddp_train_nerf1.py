@@ -20,6 +20,7 @@ from ddp_sampling import intersect_cylinder, intersect_sphere, perturb_samples, 
 from render_single_image1 import render_single_image
 from create_nerf import create_nerf
 from tonemapping import Gamma22, EventLogSpace
+from network.cta_fusion_arch import sample_feature_by_uv
 
 RGBGRAY = torch.tensor([0.299,0.587,0.114])
 
@@ -72,6 +73,36 @@ def get_sample_sizes(total, split_count):
     assert np.sum(sizes) == total
     assert len(sizes) == split_count
     return sizes
+
+def _closest_frame_from_sampler(ray_sampler, timestamp):
+    if ray_sampler.sRGB is None or len(ray_sampler.sRGB) == 0:
+        return None
+    dists = [(abs(ray_sampler.reverse_map_time(frame_number) - timestamp), idx)
+             for idx, (frame_number, _) in enumerate(ray_sampler.sRGB)]
+    _, min_idx = min(dists)
+    return ray_sampler.sRGB[min_idx][1]
+
+
+def _build_event_voxel_from_stream(ray_sampler, t0, t1, bins, device):
+    xs, ys, ts, ps = ray_sampler.events
+    t0f = ray_sampler.map_time(t0)
+    t1f = ray_sampler.map_time(t1)
+    if t1f < t0f:
+        t0f, t1f = t1f, t0f
+    mask = (ts >= t0f) & (ts < t1f)
+    xs_w = torch.from_numpy(xs[mask]).long().to(device)
+    ys_w = torch.from_numpy(ys[mask]).long().to(device)
+    ts_w = torch.from_numpy(ts[mask]).float().to(device)
+    ps_w = torch.from_numpy(ps[mask]).float().to(device)
+    voxel = torch.zeros((1, bins, ray_sampler.H, ray_sampler.W), device=device)
+    if xs_w.numel() == 0:
+        return voxel
+    tau = ((ts_w - t0f) / max(t1f - t0f, 1e-6)).clamp(0.0, 1.0 - 1e-6)
+    bi = (tau * bins).long().clamp(0, bins - 1)
+    flat_hw = ray_sampler.H * ray_sampler.W
+    linear = bi * flat_hw + ys_w * ray_sampler.W + xs_w
+    voxel.view(-1).index_add_(0, linear, ps_w)
+    return voxel
 
 
 # -------------------------------
@@ -211,6 +242,23 @@ def ddp_train_nerf(local_rank, args):
                 neg_ratio=current_neg_ratio,
                 temporal_slices=max(1, args.event_temporal_slices)
             )
+            if args.use_cta_fusion and 'cta_fusion' in models:
+                cta_fusion = models['cta_fusion']
+                mid_t = 0.5 * (start_time + end_time)
+                rgb_prev_np = _closest_frame_from_sampler(ray_samplers[i], start_time)
+                rgb_t_np = _closest_frame_from_sampler(ray_samplers[i], mid_t)
+                rgb_next_np = _closest_frame_from_sampler(ray_samplers[i], end_time)
+                if rgb_prev_np is not None and rgb_t_np is not None and rgb_next_np is not None:
+                    rgb_prev = torch.from_numpy(rgb_prev_np).float().view(1, ray_samplers[i].H, ray_samplers[i].W, -1).permute(0, 3, 1, 2).to(rank)
+                    rgb_t = torch.from_numpy(rgb_t_np).float().view(1, ray_samplers[i].H, ray_samplers[i].W, -1).permute(0, 3, 1, 2).to(rank)
+                    rgb_next = torch.from_numpy(rgb_next_np).float().view(1, ray_samplers[i].H, ray_samplers[i].W, -1).permute(0, 3, 1, 2).to(rank)
+                    evt_prev = _build_event_voxel_from_stream(ray_samplers[i], start_time, mid_t, args.cta_event_bins, rank)
+                    evt_next = _build_event_voxel_from_stream(ray_samplers[i], mid_t, end_time, args.cta_event_bins, rank)
+                    f_t_map = cta_fusion(rgb_prev, rgb_t, rgb_next, evt_prev, evt_next)
+                    uv = ray_batch['pixel_uv'].to(rank).unsqueeze(0)
+                    ray_batch['cta_ray_feat'] = sample_feature_by_uv(f_t_map, uv).squeeze(0)
+                else:
+                    ray_batch['cta_ray_feat'] = None
             for key in ray_batch:
                 # print(key, torch.is_tensor(ray_batch[key]), ray_batch[key])
                 if torch.is_tensor(ray_batch[key]):
@@ -362,11 +410,16 @@ def ddp_train_nerf(local_rank, args):
                     # bg_depth, _ = torch.sort(torch.cat((bg_depth, bg_depth_samples), dim=-1))
 
                 all_rets = []
+                cta_ray_feat = ray_batch.get('cta_ray_feat', None)
+
                 if not args.is_rgb_only:
-                    ret_start = net(ray_batch['ray_o'], ray_batch['ray_d'], ray_batch['start_ray_t'], fg_far_depth, fg_depth_start, ray_batch['background_linear'], global_step)
-                    ret_end = net(ray_batch['ray_o'], ray_batch['ray_d'], ray_batch['end_ray_t'], fg_far_depth, fg_depth_end, ray_batch['background_linear'], global_step)
+                    # ret_start = net(ray_batch['ray_o'], ray_batch['ray_d'], ray_batch['start_ray_t'], fg_far_depth, fg_depth_start, ray_batch['background_linear'], global_step)
+                    # ret_end = net(ray_batch['ray_o'], ray_batch['ray_d'], ray_batch['end_ray_t'], fg_far_depth, fg_depth_end, ray_batch['background_linear'], global_step)
+                    ret_start = net(ray_batch['ray_o'], ray_batch['ray_d'], ray_batch['start_ray_t'], fg_far_depth, fg_depth_start, ray_batch['background_linear'], global_step, ray_feat=cta_ray_feat)
+                    ret_end = net(ray_batch['ray_o'], ray_batch['ray_d'], ray_batch['end_ray_t'], fg_far_depth, fg_depth_end, ray_batch['background_linear'], global_step, ray_feat=cta_ray_feat)
                     all_rets += [ret_start, ret_end]
-                ret_ref = net(ray_batch['ray_o'], ray_batch['ray_d'], ray_batch['ref_ray_t'], fg_far_depth, fg_depth_ref, ray_batch['background_linear'], global_step)
+                # ret_ref = net(ray_batch['ray_o'], ray_batch['ray_d'], ray_batch['ref_ray_t'], fg_far_depth, fg_depth_ref, ray_batch['background_linear'], global_step)
+                ret_ref = net(ray_batch['ray_o'], ray_batch['ray_d'], ray_batch['ref_ray_t'], fg_far_depth, fg_depth_ref, ray_batch['background_linear'], global_step, ray_feat=cta_ray_feat)
                 all_rets += [ret_ref]
 
                 # all_rets.append(ret)
@@ -473,6 +526,21 @@ def ddp_train_nerf(local_rank, args):
                     loss = event_loss + ref_rgb_loss*0.01 + ref_acc_loss
                 else:
                     loss = ref_rgb_loss
+
+                cta_l_high = torch.zeros(1, device=ray_batch['ray_o'].device)
+                cta_l_low = torch.zeros(1, device=ray_batch['ray_o'].device)
+                if args.use_cta_fusion and 'cta_losses' in models and ray_batch.get('cta_ray_feat', None) is not None:
+                    cta_losses = models['cta_losses']
+                    c_hat = ret_ref['rgb_linear'].transpose(0, 1).unsqueeze(0).unsqueeze(2)
+                    event_frame = ray_batch['events'].to(rank).transpose(0, 1).unsqueeze(0).unsqueeze(2) if ray_batch['events'] is not None else torch.zeros_like(c_hat[:, :1])
+                    rgb_frame = ref_rgb_gt_linear.transpose(0, 1).unsqueeze(0).unsqueeze(2)
+                    cta_l_high, cta_l_low = cta_losses(c_hat, event_frame, rgb_frame)
+                    warmup = min(global_step / max(args.cta_warmup_iters, 1), 1.0)
+                    w_high = args.cta_loss_high_w * warmup
+                    w_low = args.cta_loss_low_w * warmup
+                    loss = loss + w_high * cta_l_high + w_low * cta_l_low
+                    scalars_to_log['level_{}/cta_w_high'.format(m)] = float(w_high)
+                    scalars_to_log['level_{}/cta_w_low'.format(m)] = float(w_low)
                 # loss = rgb_loss
                 # loss = img2mse(ret['rgb'], rgb_gt)
                 # loss = img2mse(ret['rgb'], (diff_gt-diff_gt.min())/(diff_gt.max()-diff_gt.min()))
@@ -525,6 +593,8 @@ def ddp_train_nerf(local_rank, args):
                     scalars_to_log['level_{}/temporal_event_loss'.format(m)] = temporal_event_loss.item()
                 scalars_to_log['level_{}/ref_rgb_loss'.format(m)] = ref_rgb_loss.item()
                 scalars_to_log['level_{}/ref_acc_loss'.format(m)] = ref_acc_loss.item()
+                scalars_to_log['level_{}/cta_l_high'.format(m)] = cta_l_high.item()
+                scalars_to_log['level_{}/cta_l_low'.format(m)] = cta_l_low.item()
                 scalars_to_log['level_{}/lambda_loss'.format(m)] = lambda_loss.item()
                 scalars_to_log['lambda_reg_factor'.format(m)] = lambda_reg_factor
                 if args.is_rgb_only:
@@ -621,6 +691,9 @@ def ddp_train_nerf(local_rank, args):
 
             name = 'net'
             to_save[name] = models[name].state_dict()
+            if args.use_cta_fusion and 'cta_fusion' in models:
+                to_save['cta_fusion'] = models['cta_fusion'].state_dict()
+                to_save['cta_film'] = models['cta_film'].state_dict()
 
             if 'crf_net' in models:
                 name = 'crf_net'
