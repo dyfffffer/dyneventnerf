@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import os
 import time
+import inspect
 from collections import OrderedDict
 
 import numpy as np
@@ -17,9 +18,12 @@ from utils import img2mse, mse2psnr, img_HWC2CHW, colorize
 from data_loader_split import load_event_data_split
 from nerf_sample_ray_split import CameraManager
 from ddp_sampling import intersect_cylinder, intersect_sphere, perturb_samples, sample_pdf
-from render_single_image import render_single_image
+from render_single_image1 import render_single_image
 from create_nerf import create_nerf
 from tonemapping import Gamma22, EventLogSpace
+from network.cta_fusion_arch import sample_feature_by_uv
+
+RGBGRAY = torch.tensor([0.299,0.587,0.114])
 
 
 # -------------------------------
@@ -71,11 +75,47 @@ def get_sample_sizes(total, split_count):
     assert len(sizes) == split_count
     return sizes
 
+def _closest_frame_from_sampler(ray_sampler, timestamp):
+    if ray_sampler.sRGB is None or len(ray_sampler.sRGB) == 0:
+        return None
+    dists = [(abs(ray_sampler.reverse_map_time(frame_number) - timestamp), idx)
+             for idx, (frame_number, _) in enumerate(ray_sampler.sRGB)]
+    _, min_idx = min(dists)
+    return ray_sampler.sRGB[min_idx][1]
 
+
+def _build_event_voxel_from_stream(ray_sampler, t0, t1, bins, device):
+    xs, ys, ts, ps = ray_sampler.events
+    t0f = ray_sampler.map_time(t0)
+    t1f = ray_sampler.map_time(t1)
+    if t1f < t0f:
+        t0f, t1f = t1f, t0f
+    mask = (ts >= t0f) & (ts < t1f)
+    xs_w = torch.from_numpy(xs[mask]).long().to(device)
+    ys_w = torch.from_numpy(ys[mask]).long().to(device)
+    ts_w = torch.from_numpy(ts[mask]).float().to(device)
+    ps_w = torch.from_numpy(ps[mask]).float().to(device)
+    voxel = torch.zeros((1, bins, ray_sampler.H, ray_sampler.W), device=device)
+    if xs_w.numel() == 0:
+        return voxel
+    tau = ((ts_w - t0f) / max(t1f - t0f, 1e-6)).clamp(0.0, 1.0 - 1e-6)
+    bi = (tau * bins).long().clamp(0, bins - 1)
+    flat_hw = ray_sampler.H * ray_sampler.W
+    linear = bi * flat_hw + ys_w * ray_sampler.W + xs_w
+    voxel.view(-1).index_add_(0, linear, ps_w)
+    return voxel
+
+
+def _net_accepts_ray_feat(net):
+    target = net.module if hasattr(net, 'module') else net
+    sig = inspect.signature(target.forward)
+    return 'ray_feat' in sig.parameters
 # -------------------------------
 # DDP 修改：传入 local_rank，初始化分布式
 # -------------------------------
 def ddp_train_nerf(local_rank, args):
+    
+    
     print(f"=== Rank {local_rank} starting ===")
     
     rank = local_rank
@@ -99,8 +139,8 @@ def ddp_train_nerf(local_rank, args):
     logger.info(f'Rank {rank} gpu_mem: {torch.cuda.get_device_properties(rank).total_memory}')
     if torch.cuda.get_device_properties(rank).total_memory / 1e9 > 14:
         logger.info('setting batch size according to 24G gpu')
-        args.N_rand = 1024
-        args.chunk_size = 8192
+        args.N_rand = 1024 # 1024 4096
+        args.chunk_size = 8192 # 8192 32768
     elif torch.cuda.get_device_properties(rank).total_memory / 1e9 > 7:
         logger.info('setting batch size according to 12G gpu')
         args.N_rand = 512
@@ -170,6 +210,8 @@ def ddp_train_nerf(local_rank, args):
 
     # 训练循环保持原来的实现
     for global_step in range(start + 1, args.N_iters):
+        torch.autograd.set_detect_anomaly(True)
+
         time0 = time.time()
         scalars_to_log = OrderedDict()
         ### Start of core optimization loop
@@ -199,9 +241,36 @@ def ddp_train_nerf(local_rank, args):
         end_time = min(1, mid_time+duration/2)
 
         for i in range(len(ray_samplers)):
-
             # todo: should pass start time and end time
-            ray_batch = ray_samplers[i].random_sample(sizes[i], start_time, end_time, neg_ratio=current_neg_ratio)
+            # ray_batch = ray_samplers[i].random_sample(sizes[i], start_time, end_time, neg_ratio=current_neg_ratio)
+            ray_batch = ray_samplers[i].random_sample(
+                sizes[i], start_time, end_time,
+                neg_ratio=current_neg_ratio,
+                temporal_slices=max(1, args.event_temporal_slices)
+            )
+           
+            if args.use_cta_fusion and 'cta_fusion' in models:
+                cta_fusion = models['cta_fusion']
+                mid_t = 0.5 * (start_time + end_time)
+                rgb_prev_np = _closest_frame_from_sampler(ray_samplers[i], start_time)
+                rgb_t_np = _closest_frame_from_sampler(ray_samplers[i], mid_t)
+                rgb_next_np = _closest_frame_from_sampler(ray_samplers[i], end_time)
+
+                if rgb_prev_np is not None and rgb_t_np is not None and rgb_next_np is not None:
+                    rgb_prev = torch.from_numpy(rgb_prev_np).float().view(1, ray_samplers[i].H, ray_samplers[i].W, -1).permute(0, 3, 1, 2).to(rank)
+                    rgb_t = torch.from_numpy(rgb_t_np).float().view(1, ray_samplers[i].H, ray_samplers[i].W, -1).permute(0, 3, 1, 2).to(rank)
+                    rgb_next = torch.from_numpy(rgb_next_np).float().view(1, ray_samplers[i].H, ray_samplers[i].W, -1).permute(0, 3, 1, 2).to(rank)
+
+                    evt_prev = _build_event_voxel_from_stream(ray_samplers[i], start_time, mid_t, args.cta_event_bins, rank)
+                    evt_next = _build_event_voxel_from_stream(ray_samplers[i], mid_t, end_time, args.cta_event_bins, rank)
+                    f_t_map = cta_fusion(rgb_prev, rgb_t, rgb_next, evt_prev, evt_next)
+
+                    uv = ray_batch['pixel_uv'].to(rank).unsqueeze(0)
+                    f_t = sample_feature_by_uv(f_t_map, uv).squeeze(0)
+                    ray_batch['cta_ray_feat'] = f_t
+                else:
+                    ray_batch['cta_ray_feat'] = None
+            
             for key in ray_batch:
                 # print(key, torch.is_tensor(ray_batch[key]), ray_batch[key])
                 if torch.is_tensor(ray_batch[key]):
@@ -222,15 +291,19 @@ def ddp_train_nerf(local_rank, args):
                 # pass through the list
                 ray_batch_combined[key] = ray_batches[key]
 
-        # print(ray_batch_combined)
+        crf_out = None
         # 假设 crf_net 已在上部创建并 to(rank)，且可能被 DDP 包裹
         if 'sRGB' in ray_batch_combined and ray_batch_combined['sRGB'] is not None:
-            warmup = getattr(args, 'crf_warmup', getattr(args, 'warmup', 0))
+            warmup = getattr(args, 'crf_warmup', getattr(args, 'warmup', 1500))
             skip_crf = (global_step < warmup)
             # ray_batch_combined['rgb_srgb'] 已是 tensor 且在 device 上
             # 确认 CRF 前向参与了 loss
+            if rank == 0 and global_step < 5:
+                print("sRGB shape:", ray_batch_combined['sRGB'].shape, "dim:", ray_batch_combined['sRGB'].dim())
             crf_out= crf_net(ray_batch_combined['sRGB'], skip_learn=skip_crf)
-            crf_out.retain_grad()
+            if crf_out.requires_grad:
+                crf_out.retain_grad()
+
 
             ray_batch_combined['rgb_linear'] = crf_out
 
@@ -241,6 +314,7 @@ def ddp_train_nerf(local_rank, args):
         optim = models['optim']
         lr_scheduler = models['lr_scheduler']
         net = models['net']
+        supports_ray_feat = _net_accepts_ray_feat(net)
 
         if args.optimize_transform: # todo: get rid of this transforms stuff?
             net.unfreeze_transform()
@@ -261,38 +335,59 @@ def ddp_train_nerf(local_rank, args):
             
 
         optim.zero_grad()
+        total_loss = None
 
+        '''
+        最核心的训练循环部分
+        级连（coarse-to-fine）采样+渲染+多损失优化
+        采样深度、前向渲染、构造监督信号、组装总loss、反向传播、优化器更新、学习率调度器更新
+        这里对start end ref分别进行了采样
+
+        为什么要 cascade_level：coarse-to-fine 的层级渲染？
+        m=0（coarse）：用均匀采样在近远平面间取一串深度点，快速得到一个粗糙的密度/颜色分布
+        m>0（fine）：利用上一层输出的 fg_weights（体渲染的权重）做重要性采样（PDF sampling），把采样点集中到更可能有表面/结构的深度区域。
+
+        为什么有 start / end / ref 三次 forward？
+        这是一种“事件监督常见结构”：start/end：用来构造曝光窗口内的亮度变化
+        ref：用来做 RGB 监督（某一参考时刻的清晰帧）
+
+        '''
         for m in range(models['cascade_level']):
             with autocast():
                 # sample depths
                 N_samples = models['cascade_samples'][m]
                 if m == 0:
                     # foreground depth
-
+                    # 先算每条 ray 的近远交点（sphere/cylinder），得到一个初始的深度范围；在训练时对这个范围均匀采样，在测试时直接用这个范围的端点；后续层级再基于这个范围做重要性采样
                     ray_o = ray_batch['ray_o']
                     ray_d = ray_batch['ray_d']
-                    fg_far_depth = intersect_sphere(ray_o, ray_d)  # [...,]
-                    fg_near_depth = ray_batch['min_depth']  # [..., ]
+                    fg_far_depth = intersect_sphere(ray_o, ray_d)  # 球体包围的远端交点
+                    fg_near_depth = ray_batch['min_depth']  # 近端交点（可能是预设的最小深度，或者是某个包围盒的近端交点）
 
                     # ray_o, ray_d = bound_transform.inverse(ray_o, ray_d)
 
                     # ----
+                    # 得到圆柱体裁剪的 near/far交点，进一步裁剪深度范围
+                    # 这一步是在做空间裁剪：只在你关心的几何区域内采样，减少空区域浪费。
                     fg_near_depth_cyl, fg_far_depth_cyl = intersect_cylinder(ray_o, ray_d, args.crop_r, args.crop_y_min, args.crop_y_max)
                     assert fg_far_depth_cyl.shape == fg_far_depth_cyl.shape
                     assert fg_near_depth_cyl.shape == fg_near_depth_cyl.shape
 
                     fg_near_depth = torch.maximum(fg_near_depth, fg_near_depth_cyl)
                     fg_far_depth = torch.minimum(fg_far_depth, fg_far_depth_cyl)
+                    
                     # ----
-
+                    # 在 [near, far] 上均匀取 N 个深度点，再加随机扰动（训练时常用，减少 aliasing）。测试时可以不扰动，直接用均匀点。
                     step = (fg_far_depth - fg_near_depth) / (N_samples - 1)
                     fg_depth = torch.stack([fg_near_depth + i * step for i in range(N_samples)], dim=-1)  # [..., N_samples]
                     fg_depth = perturb_samples(fg_depth)  # random perturbation during training
 
+                    # 把同一组 fg_depth 复制给 start/end/ref 三个时间点
                     fg_depth_start = fg_depth
                     fg_depth_end = fg_depth
                     fg_depth_ref = fg_depth
 
+                # pdf重要性采样
                 else:
                     if not args.is_rgb_only:
                         # sample pdf and concat with earlier samples
@@ -328,11 +423,18 @@ def ddp_train_nerf(local_rank, args):
                     # bg_depth, _ = torch.sort(torch.cat((bg_depth, bg_depth_samples), dim=-1))
 
                 all_rets = []
+                cta_ray_feat = ray_batch.get('cta_ray_feat', None)
+
+                net_kwargs = {'ray_feat': cta_ray_feat} if supports_ray_feat else {}
+
                 if not args.is_rgb_only:
-                    ret_start = net(ray_batch['ray_o'], ray_batch['ray_d'], ray_batch['start_ray_t'], fg_far_depth, fg_depth_start, ray_batch['background_linear'], global_step)
-                    ret_end = net(ray_batch['ray_o'], ray_batch['ray_d'], ray_batch['end_ray_t'], fg_far_depth, fg_depth_end, ray_batch['background_linear'], global_step)
+                    # ret_start = net(ray_batch['ray_o'], ray_batch['ray_d'], ray_batch['start_ray_t'], fg_far_depth, fg_depth_start, ray_batch['background_linear'], global_step)
+                    # ret_end = net(ray_batch['ray_o'], ray_batch['ray_d'], ray_batch['end_ray_t'], fg_far_depth, fg_depth_end, ray_batch['background_linear'], global_step)
+                    ret_start = net(ray_batch['ray_o'], ray_batch['ray_d'], ray_batch['start_ray_t'], fg_far_depth, fg_depth_start, ray_batch['background_linear'], global_step, **net_kwargs)
+                    ret_end = net(ray_batch['ray_o'], ray_batch['ray_d'], ray_batch['end_ray_t'], fg_far_depth, fg_depth_end, ray_batch['background_linear'], global_step, **net_kwargs)
                     all_rets += [ret_start, ret_end]
-                ret_ref = net(ray_batch['ray_o'], ray_batch['ray_d'], ray_batch['ref_ray_t'], fg_far_depth, fg_depth_ref, ray_batch['background_linear'], global_step)
+                # ret_ref = net(ray_batch['ray_o'], ray_batch['ray_d'], ray_batch['ref_ray_t'], fg_far_depth, fg_depth_ref, ray_batch['background_linear'], global_step)
+                ret_ref = net(ray_batch['ray_o'], ray_batch['ray_d'], ray_batch['ref_ray_t'], fg_far_depth, fg_depth_ref, ray_batch['background_linear'], global_step, **net_kwargs)
                 all_rets += [ret_ref]
 
                 # all_rets.append(ret)
@@ -349,25 +451,63 @@ def ddp_train_nerf(local_rank, args):
                 event_mask = mask_gt
                 eps = args.tonemap_eps
 
+                # event loss
                 if not args.is_rgb_only:
-                    start_log = EventLogSpace.from_linear(ret_start['rgb_linear'], eps)
+                    start_log = EventLogSpace.from_linear(ret_start['rgb_linear'], eps) 
                     end_log = EventLogSpace.from_linear(ret_end['rgb_linear'], eps)
-
-                    diff = end_log - start_log
-
-                    diff = diff * color_mask
+                    diff = end_log - start_log 
+                    diff = diff * color_mask 
                     events_gt = events_gt * color_mask
-
                     THR = args.event_threshold
+                    
                     event_loss = img2mse(diff, events_gt*THR, event_mask)
-                    event_random_loss = img2mse(diff*0, events_gt*THR, event_mask)
+                    event_random_loss = img2mse(diff*0, events_gt*THR, event_mask) 
+                
+                    temporal_event_loss = torch.zeros_like(event_loss)
+                    temporal_slices = max(1, args.event_temporal_slices)
+                    if temporal_slices > 1 and ray_batch['events_slices'] is not None:
+                        start_t = float(ray_batch['start_ray_t'][0].item())
+                        end_t = float(ray_batch['end_ray_t'][0].item())
+                        events_slices = ray_batch['events_slices'].to(rank)
+
+                        temporal_logs = []
+                        for k in range(temporal_slices + 1):
+                            tk = start_t + (end_t - start_t) * (k / temporal_slices)
+                            rays_t = tk * torch.ones_like(ray_batch['start_ray_t'])
+                            ret_k = net(ray_batch['ray_o'], ray_batch['ray_d'], rays_t, fg_far_depth, fg_depth_start,
+                                        ray_batch['background_linear'], global_step)
+                            rgb_k = ret_k['rgb_linear']
+                            if rgb_k.shape[-1] == 3:
+                                rgbgray = torch.tensor([0.299, 0.587, 0.114],
+                                                       device=rgb_k.device,
+                                                       dtype=rgb_k.dtype)
+                                rgb_k = torch.sum(rgb_k * rgbgray, dim=-1, keepdim=True)
+                            temporal_logs.append(EventLogSpace.from_linear(rgb_k, eps))
+
+                        for k in range(temporal_slices):
+                            events_k = events_slices[k]
+                            local_mask = event_color_mask
+                            if events_k.shape[-1] == 3:
+                                rgbgray = torch.tensor([0.299, 0.587, 0.114],
+                                                       device=events_k.device,
+                                                       dtype=events_k.dtype)
+                                events_k = torch.sum(events_k * rgbgray, dim=-1, keepdim=True)
+                                if local_mask.shape[-1] == 3:
+                                    local_mask = torch.sum(local_mask * rgbgray, dim=-1, keepdim=True)
+                            diff_k = (temporal_logs[k + 1] - temporal_logs[k]) * local_mask
+                            events_k = events_k * local_mask
+                            temporal_event_loss = temporal_event_loss + img2mse(diff_k, events_k * THR, event_mask)
+                        temporal_event_loss = temporal_event_loss / temporal_slices
+                        event_loss = event_loss + args.event_temporal_weight * temporal_event_loss
+                
                 else:
                     event_loss = torch.zeros(1)
                     event_random_loss = torch.zeros(1)
+                    temporal_event_loss = torch.zeros(1)
 
                 # assert mask_gt is None
+                # ref_rgb_loss：参考时刻渲染 vs 参考时刻 GT
                 ref_rgb_gt_linear = ray_batch['rgb_linear'].to(rank)
-
                 ref_rgb_render_linear = ret_ref['rgb_linear']
 
                 if ref_rgb_gt_linear.shape[-1] == 1:
@@ -379,9 +519,9 @@ def ddp_train_nerf(local_rank, args):
                 ref_rgb_loss = img2mse(ref_rgb_render_linear, ref_rgb_gt_linear, mask=mask_gt)
                 # ref_rgb_loss = 0.
 
+                # ref_acc_loss：从 ref 积分到 end 的一致性
                 if not args.is_rgb_only:
                     ref_rgb_gt_log = EventLogSpace.from_linear(ref_rgb_gt_linear, eps)
-
                     events_from_ref_to_end_gt = ray_batch['events_from_ref_to_end']
                     end_rgb_gt_log = (ref_rgb_gt_log + events_from_ref_to_end_gt * THR)
                     ref_acc_loss = img2mse(end_log * color_mask, end_rgb_gt_log * color_mask, mask=mask_gt)
@@ -401,10 +541,26 @@ def ddp_train_nerf(local_rank, args):
                     loss = event_loss + ref_rgb_loss*0.01 + ref_acc_loss
                 else:
                     loss = ref_rgb_loss
+
+                cta_l_high = torch.zeros(1, device=ray_batch['ray_o'].device)
+                cta_l_low = torch.zeros(1, device=ray_batch['ray_o'].device)
+                if args.use_cta_fusion and 'cta_losses' in models and ray_batch.get('cta_ray_feat', None) is not None:
+                    cta_losses = models['cta_losses']
+                    c_hat = ret_ref['rgb_linear'].transpose(0, 1).unsqueeze(0).unsqueeze(2)
+                    event_frame = ray_batch['events'].to(rank).transpose(0, 1).unsqueeze(0).unsqueeze(2) if ray_batch['events'] is not None else torch.zeros_like(c_hat[:, :1])
+                    rgb_frame = ref_rgb_gt_linear.transpose(0, 1).unsqueeze(0).unsqueeze(2)
+                    cta_l_high, cta_l_low = cta_losses(c_hat, event_frame, rgb_frame)
+                    warmup = min(global_step / max(args.cta_warmup_iters, 1), 1.0)
+                    w_high = args.cta_loss_high_w * warmup
+                    w_low = args.cta_loss_low_w * warmup
+                    loss = loss + w_high * cta_l_high + w_low * cta_l_low
+                    scalars_to_log['level_{}/cta_w_high'.format(m)] = float(w_high)
+                    scalars_to_log['level_{}/cta_w_low'.format(m)] = float(w_low)
                 # loss = rgb_loss
                 # loss = img2mse(ret['rgb'], rgb_gt)
                 # loss = img2mse(ret['rgb'], (diff_gt-diff_gt.min())/(diff_gt.max()-diff_gt.min()))
 
+                # 鼓励深度分布更紧凑/更合理
                 if args.use_ldist_reg:
                     ldist = 0.
                     for ret in all_rets:
@@ -412,6 +568,7 @@ def ddp_train_nerf(local_rank, args):
                         ldist = ldist + ret['fg_ldist'].mean()
                     loss = loss + ldist * args.ldist_reg
 
+                # 平滑正则
                 if args.use_tv_reg:
                     tv = 0.
                     for ret in all_rets:
@@ -419,6 +576,7 @@ def ddp_train_nerf(local_rank, args):
                         tv = tv + ret['fg_tv'].mean()
                     loss = loss + tv * args.tv_reg
 
+                # Tensorf 稀疏/平滑/TV 等
                 if args.use_tensorf_sparsity:
                     if global_step >= args.tensorf_sparsity_startit:
                         trf_reg = net.fg_net.get_sparsity_reg()  # todo: ugly
@@ -435,24 +593,23 @@ def ddp_train_nerf(local_rank, args):
                     loss = loss + trf_tv * args.tensorf_tv
 
                 # sparsify as much as possible
+                # 直观上是“让背景/空域更稀疏、更干净”，并用 lambda_reg_factor = 1-exp(-step/anneal) 做退火，训练越往后正则越强
                 lambda_loss = 0.
                 for ret in all_rets:
-                # for ret in [ret_start, ret_end]:
                     bg_lambda = ret['bg_lambda'] #.mean()
                     lambda_loss = lambda_loss + (1-bg_lambda).mean() #todo: why is it mean() here as well?
-                    # lambda_loss = lambda_loss + torch.log(torch.clamp(1-bg_lambda, min=1e-4)).mean()
-                    # lambda_loss = lambda_loss + lambda_loss + torch.log(torch.clamp(bg_lambda, min=1e-4)).mean()
-                    # lambda_loss = lambda_loss + ((1-bg_lambda)**2).mean()
-                # lambda_reg_factor = 0. if global_step < 4000 else 1.
                 lambda_reg_factor = 1-np.exp(-global_step/args.N_anneal_lambda)
-                # lambda_reg_factor = 1.
                 loss = loss + args.lambda_reg * lambda_reg_factor * lambda_loss
 
                 # scalars_to_log['exposure_log'.format(m)] = net.exposure_log.item()
                 scalars_to_log['level_{}/loss'.format(m)] = loss.item()
                 scalars_to_log['level_{}/event_loss'.format(m)] = event_loss.item()
+                if args.event_temporal_slices > 1:
+                    scalars_to_log['level_{}/temporal_event_loss'.format(m)] = temporal_event_loss.item()
                 scalars_to_log['level_{}/ref_rgb_loss'.format(m)] = ref_rgb_loss.item()
                 scalars_to_log['level_{}/ref_acc_loss'.format(m)] = ref_acc_loss.item()
+                scalars_to_log['level_{}/cta_l_high'.format(m)] = cta_l_high.item()
+                scalars_to_log['level_{}/cta_l_low'.format(m)] = cta_l_low.item()
                 scalars_to_log['level_{}/lambda_loss'.format(m)] = lambda_loss.item()
                 scalars_to_log['lambda_reg_factor'.format(m)] = lambda_reg_factor
                 if args.is_rgb_only:
@@ -477,9 +634,46 @@ def ddp_train_nerf(local_rank, args):
                 if args.use_tensorf_tv:
                     scalars_to_log['level_{}/trf_tv'.format(m)] = trf_tv.item()
 
-            scaler.scale(loss).backward()
+            # scaler.scale(loss).backward()
+            if total_loss is None:
+                total_loss = loss
+            else:
+                total_loss = total_loss + loss
+        if not torch.isfinite(loss):
+                logger.warning(f'Rank {rank} step {global_step} level {m}: non-finite loss detected, skipping backward')
+                optim.zero_grad(set_to_none=True)
+                continue
+        scaler.scale(total_loss).backward()
+        # if crf_out is not None:
+        #     print(crf_out.grad is None, crf_out.grad.abs().mean().item() if crf_out.grad is not None else None)
 
-            print(crf_out.grad is None, crf_out.grad.abs().mean().item() if crf_out.grad is not None else None)
+        # gradient/parameter health metrics for divergence monitoring
+        grad_norm_sq = 0.0
+        param_norm_sq = 0.0
+        nan_count = 0
+        inf_count = 0
+        for pg in optim.param_groups:
+            for p in pg['params']:
+                if p is None:
+                    continue
+                p_det = p.detach()
+                nan_count += torch.isnan(p_det).sum().item()
+                inf_count += torch.isinf(p_det).sum().item()
+                param_norm_sq += float(torch.sum(p_det * p_det).item())
+                if p.grad is not None:
+                    g = p.grad.detach()
+                    nan_count += torch.isnan(g).sum().item()
+                    inf_count += torch.isinf(g).sum().item()
+                    grad_norm_sq += float(torch.sum(g * g).item())
+        grad_norm = grad_norm_sq ** 0.5
+        param_norm = param_norm_sq ** 0.5
+        update_ratio = grad_norm / (param_norm + 1e-12)
+        scalars_to_log['grad_norm'] = grad_norm
+        scalars_to_log['param_norm'] = param_norm
+        scalars_to_log['update_ratio'] = update_ratio
+        scalars_to_log['nan_count'] = float(nan_count)
+        scalars_to_log['inf_count'] = float(inf_count)
+
 
         scaler.step(optim)
         scaler.update()
@@ -544,6 +738,13 @@ def ddp_train_nerf(local_rank, args):
 
             name = 'net'
             to_save[name] = models[name].state_dict()
+            if args.use_cta_fusion and 'cta_fusion' in models:
+                to_save['cta_fusion'] = models['cta_fusion'].state_dict()
+                to_save['cta_film'] = models['cta_film'].state_dict()
+
+            if 'crf_net' in models:
+                name = 'crf_net'
+                to_save[name] = models[name].state_dict()
 
             name = 'optim'
             to_save[name] = models[name].state_dict()

@@ -139,6 +139,26 @@ class NerfNet(nn.Module):
         self.with_tv = args.use_tv_reg
 
         self.bg_color = Gamma22.to_linear(args.bg_color/255.)
+        self.use_cta_fusion = getattr(args, 'use_cta_fusion', False)
+        self.cta_feat_dim = getattr(args, 'cta_feat_ch', 32) * 2
+        if self.use_cta_fusion:
+            self.cta_cond = nn.Sequential(
+                nn.Linear(self.cta_feat_dim, 16),
+                nn.GELU(),
+                nn.Linear(16, 4),
+            )
+    def _prepare_ray_feat(self, ray_feat: torch.Tensor) -> torch.Tensor:
+        # expected shape: [..., self.cta_feat_dim]
+        if ray_feat.shape[-1] != self.cta_feat_dim:
+            if ray_feat.shape[-1] > self.cta_feat_dim:
+                ray_feat = ray_feat[..., :self.cta_feat_dim]
+            else:
+                pad = self.cta_feat_dim - ray_feat.shape[-1]
+                ray_feat = F.pad(ray_feat, (0, pad))
+        ray_feat = torch.nan_to_num(ray_feat, nan=0.0, posinf=1e2, neginf=-1e2)
+        ray_feat = torch.clamp(ray_feat, -50.0, 50.0)
+        return ray_feat
+
 
     def freeze_backend(self):
         for p in self.fg_net.parameters():
@@ -157,7 +177,8 @@ class NerfNet(nn.Module):
             p.requires_grad_(True)
 
 
-    def forward(self, ray_o, ray_d, ray_t, fg_z_max, fg_z_vals, bg_rgb_linear, iteration):
+    # def forward(self, ray_o, ray_d, ray_t, fg_z_max, fg_z_vals, bg_rgb_linear, iteration):
+    def forward(self, ray_o, ray_d, ray_t, fg_z_max, fg_z_vals, bg_rgb_linear, iteration, ray_feat=None):
         '''
         :param ray_o, ray_d: [..., 3]
         :param fg_z_max: [...,]
@@ -165,7 +186,8 @@ class NerfNet(nn.Module):
         :return
         '''
         # print(ray_o.shape, ray_d.shape, fg_z_max.shape, fg_z_vals.shape, bg_z_vals.shape)
-        ray_d_norm = torch.norm(ray_d, dim=-1, keepdim=True)  # [..., 1]
+        # ray_d_norm = torch.norm(ray_d, dim=-1, keepdim=True)  # [..., 1]
+        ray_d_norm = torch.norm(ray_d, dim=-1, keepdim=True).clamp_min(1e-8)  # [..., 1]
         viewdirs = ray_d / ray_d_norm  # [..., 3]
         dots_sh = list(ray_d.shape[:-1])
 
@@ -178,6 +200,8 @@ class NerfNet(nn.Module):
         fg_pts = fg_ray_o + fg_z_vals.unsqueeze(-1) * fg_ray_d
         fg_pts = self.bound_transform(fg_pts)
         fg_pts = torch.cat([fg_pts, fg_ray_t], dim=-1)
+        fg_pts = torch.nan_to_num(fg_pts, nan=0.0, posinf=1e4, neginf=-1e4)
+        fg_viewdirs = torch.nan_to_num(fg_viewdirs, nan=0.0, posinf=1.0, neginf=-1.0)
         # input = torch.cat((self.fg_embedder_position(fg_pts, iteration),
         #                    self.fg_embedder_viewdir(fg_viewdirs, iteration)), dim=-1)
         # fg_raw = self.fg_net(input)
@@ -185,6 +209,26 @@ class NerfNet(nn.Module):
         fg_raw = self.fg_net(fg_pts, fg_viewdirs, iteration=iteration,
                              embedder_position=self.fg_embedder_position,
                              embedder_viewdir=self.fg_embedder_viewdir)
+        fg_raw['rgb'] = torch.nan_to_num(fg_raw['rgb'], nan=0.0, posinf=1.0, neginf=0.0)
+        fg_raw['sigma'] = torch.nan_to_num(fg_raw['sigma'], nan=0.0, posinf=1e3, neginf=0.0)
+        if self.use_cta_fusion and ray_feat is not None:
+            ray_feat = self._prepare_ray_feat(ray_feat)
+            # Guard unstable batches: if ray features are still extreme, skip conditioning for this pass.
+            unstable_feat = (not torch.isfinite(ray_feat).all()) or (ray_feat.abs().max() > 40.0)
+            if unstable_feat:
+                cond = torch.zeros((*ray_feat.shape[:-1], 4), device=ray_feat.device, dtype=fg_raw['rgb'].dtype)
+            else:
+                # Keep conditioning branch in fp32 for stability under autocast.
+                with torch.cuda.amp.autocast(enabled=False):
+                    cond = self.cta_cond(ray_feat.float())  # [..., 4]
+                cond = torch.nan_to_num(cond, nan=0.0, posinf=10.0, neginf=-10.0).to(fg_raw['rgb'].dtype)
+            rgb_scale = 1.0 + 0.05 * cond[..., 0:1]
+            rgb_bias = 0.05 * cond[..., 1:2]
+            sigma_scale = torch.sigmoid(cond[..., 2:3]) + 0.5
+            sigma_bias = F.softplus(cond[..., 3:4]) * 0.01
+
+            fg_raw['rgb'] = torch.clamp(fg_raw['rgb'] * rgb_scale.unsqueeze(-2) + rgb_bias.unsqueeze(-2), 0.0, 1.0)
+            fg_raw['sigma'] = fg_raw['sigma'] * sigma_scale + sigma_bias
         # alpha blending
         fg_dists = fg_z_vals[..., 1:] - fg_z_vals[..., :-1]
         # account for view directions

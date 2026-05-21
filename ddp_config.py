@@ -68,6 +68,14 @@ def config_parser(config_path=None):
 
     parser.add_argument("--is_rgb_only", type=str2bool, default=False)
 
+    # CTA fusion (non-complex) options
+    parser.add_argument("--use_cta_fusion", type=str2bool, default=False, help='enable CTA-GRU fusion branch')
+    parser.add_argument("--cta_event_bins", type=int, default=8, help='event voxel bins for CTA branch')
+    parser.add_argument("--cta_feat_ch", type=int, default=32, help='feature width per RGB/event encoder in CTA branch')
+    parser.add_argument("--cta_loss_high_w", type=float, default=0.0, help='weight for high-frequency CTA loss')
+    parser.add_argument("--cta_loss_low_w", type=float, default=0.0, help='weight for low-frequency CTA loss')
+    parser.add_argument("--cta_warmup_iters", type=int, default=5000, help='warmup iterations for CTA loss weights')
+
     parser.add_argument("--seed_offset", type=int, default=0, help='random seed offset')
 
     # dataset options
@@ -81,6 +89,12 @@ def config_parser(config_path=None):
                         help='will load 1/N images from train sets, useful for large datasets like deepvoxels')
 
     parser.add_argument("--event_threshold", type=float, default=0.5, help='event threshold')
+
+    parser.add_argument("--event_temporal_slices", type=int, default=1,
+                        help='number of temporal slices for event loss (1 = original start/end loss)')
+    parser.add_argument("--event_temporal_weight", type=float, default=0.0,
+                        help='extra weight for temporal sliced event loss')
+                        
     parser.add_argument("--polarity_offset", type=float, default=0.0, help='polarity offset')
     parser.add_argument("--damping_strength", type=float, default=0.93, help='event damping strength')
 
@@ -205,6 +219,8 @@ def config_parser(config_path=None):
 
     # learning rate options
     parser.add_argument("--lrate", type=float, default=5e-4, help='learning rate')
+    parser.add_argument("--crf_lrate", type=float, default=5e-4,
+                        help='learning rate for CRF network parameters')
     parser.add_argument("--lrate_decay_factor", type=float, default=0.1,
                         help='decay learning rate by a factor every specified number of steps')
     parser.add_argument("--lrate_decay_steps", type=int, default=5000,
