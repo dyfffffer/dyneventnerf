@@ -25,17 +25,19 @@
 
 # ======================多GPU运行=====================================
 #  使用 torchrun 启动 DDP，每张卡一个进程
-export CUDA_VISIBLE_DEVICES=2,3 # A40
+export CUDA_VISIBLE_DEVICES=0,1
+unset LD_LIBRARY_PATH
 export scene=lego_dyn2
 export common="--train_split train_0 --N_iters 150001 --N_anneal_lambda 30000 --use_lr_scheduler False --event_threshold 0.5 --tstart 0 --tend 1000 --neg_ratio 0.9 --tonemap_eps 1e-2 --use_viewdirs False --damping_strength 1.0"
 export base="--config configs/mlp2_lambda1e-3.txt --lrate 1e-4 --max_freq_log2_pos 14 --max_freq_log2_time 7"
 export fullmodel="${base} --lambda_reg 1e-2"
 export sceneargs=""
+tensorboard --logdir="/data/dyf/DATA/DynEventnerf/logs/add_comp0_${scene}" --port=6006 &
 
 torchrun --nproc_per_node=2 --master_port=12345 ./ddp_train_nerf1.py \
-    --expname add_comp_${scene} \
+    --expname add_comp0_${scene} \
     --scene dynsyn/${scene} \
-    --use_cta_fusion True \
+    --use_cta_fusion False \
     --cta_event_bins 8 \
     --cta_feat_ch 32 \
     --cta_loss_high_w 0.05 \
@@ -43,7 +45,9 @@ torchrun --nproc_per_node=2 --master_port=12345 ./ddp_train_nerf1.py \
     --cta_warmup_iters 5000 \
     $common $sceneargs $fullmodel
 
-## tensorboard --logdir="/data/dyf/DATA/DynEventnerf/logs/exp_${scene}" --port=6006 &
+
+
+
 # # 访问地址：localhost:6009
 ## tensorboard --logdir="/root/log/exp_add_gray_color${scene}" --port=6011 &
 ## tensorboard --logdir="/root/log/exp_${scene}" --port=6012 &

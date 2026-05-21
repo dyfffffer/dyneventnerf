@@ -6,6 +6,7 @@ import torch.optim
 from ddp_model import NerfNet
 from ddp_config import logger
 from network.crf import CRF
+from network.cta_fusion_arch import ThreeFrameCTAFusion, NeRFFiLMModulator, FusionLosses
 
 
 def create_nerf(rank, args, camera_mgr, load_camera_mgr=True, load_optimizer=True, use_lr_scheduler=True):
@@ -25,19 +26,44 @@ def create_nerf(rank, args, camera_mgr, load_camera_mgr=True, load_optimizer=Tru
     # net = DDP(net, device_ids=[rank], output_device=rank, find_unused_parameters=False)
     # net = DDP(net, device_ids=[rank], output_device=rank)
     # optim = torch.optim.Adam(net.parameters(), lr=args.lrate)
+    # 创建 cta 网络
+    use_cta_fusion = getattr(args, 'use_cta_fusion', False)
+    cta_fusion = None
+    cta_film = None
+    cta_losses = None
+    if use_cta_fusion:
+        cta_feat_ch = getattr(args, 'cta_feat_ch', 32)
+        cta_event_bins = getattr(args, 'cta_event_bins', 8)
+        cta_fusion = ThreeFrameCTAFusion(rgb_ch=3, event_bins=cta_event_bins, feat_ch=cta_feat_ch).to(rank)
+        cta_film = NeRFFiLMModulator(feat_dim=cta_feat_ch * 2, hidden_dim=cta_feat_ch * 2).to(rank)
+        cta_losses = FusionLosses().to(rank)
 
     #增加crf参数化
-    crf_lrate = getattr(args, "crf_lrate", args.lrate)
-    optim = torch.optim.AdamW(
-        [
-            {"params": net.parameters(), "lr": args.lrate},
-            {"params": crf_net.parameters(), "lr": crf_lrate},
-        ],
-        weight_decay=args.weight_decay
-    )
+    # crf_lrate = getattr(args, "crf_lrate", args.lrate)
+    # optim = torch.optim.AdamW(
+    #     [
+    #         {"params": net.parameters(), "lr": args.lrate},
+    #         {"params": crf_net.parameters(), "lr": crf_lrate},
+    #     ],
+    #     weight_decay=args.weight_decay
+    # )
+    param_groups = [
+        {"params": net.parameters(), "lr": args.lrate},
+        {"params": crf_net.parameters(), "lr": getattr(args, 'crf_lrate', args.lrate)},
+    ]
+    if use_cta_fusion:
+        param_groups.append({"params": cta_fusion.parameters(), "lr": args.lrate})
+        param_groups.append({"params": cta_film.parameters(), "lr": args.lrate})
+
+    optim = torch.optim.AdamW(param_groups, weight_decay=args.weight_decay)
 
     models["net"] = net
     models["crf_net"] = crf_net
+
+    if use_cta_fusion:
+        models["cta_fusion"] = cta_fusion
+        models["cta_film"] = cta_film
+        models["cta_losses"] = cta_losses
     models["optim"] = optim
 
 
@@ -106,6 +132,8 @@ def create_nerf(rank, args, camera_mgr, load_camera_mgr=True, load_optimizer=Tru
         to_load = torch.load(fpath, map_location=map_location)
 
         names = ['net']
+        if use_cta_fusion:
+            names.extend(['cta_fusion', 'cta_film'])
         if 'crf_net' in to_load:
             names.append('crf_net')
         if load_optimizer:

@@ -521,6 +521,13 @@ class RaySamplerSingleEventStream:
 
         color_mask = self.color_mask[select_inds, :]
 
+        select_inds_t = torch.from_numpy(select_inds.astype(np.int64))
+        px = select_inds_t % self.W
+        py = select_inds_t // self.W
+        uv_x = ((px.float() + 0.5) / self.W) * 2.0 - 1.0
+        uv_y = ((py.float() + 0.5) / self.H) * 2.0 - 1.0
+        pixel_uv = torch.stack((uv_x, uv_y), dim=-1)
+
         ret = OrderedDict([
             ('ray_o', rays_o),
             ('ray_d', rays_d),
@@ -538,6 +545,7 @@ class RaySamplerSingleEventStream:
             # ('rgb_linear', ref_rgb_linear),
             ('sRGB', sRGB),
             ('color_mask', color_mask),
+            ('pixel_uv', pixel_uv),
             ('mask', mask),
             ('background_linear', background_linear),
         ])

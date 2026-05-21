@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import os
 import time
+import inspect
 from collections import OrderedDict
 
 import numpy as np
@@ -105,6 +106,10 @@ def _build_event_voxel_from_stream(ray_sampler, t0, t1, bins, device):
     return voxel
 
 
+def _net_accepts_ray_feat(net):
+    target = net.module if hasattr(net, 'module') else net
+    sig = inspect.signature(target.forward)
+    return 'ray_feat' in sig.parameters
 # -------------------------------
 # DDP 修改：传入 local_rank，初始化分布式
 # -------------------------------
@@ -236,7 +241,6 @@ def ddp_train_nerf(local_rank, args):
         end_time = min(1, mid_time+duration/2)
 
         for i in range(len(ray_samplers)):
-
             # todo: should pass start time and end time
             # ray_batch = ray_samplers[i].random_sample(sizes[i], start_time, end_time, neg_ratio=current_neg_ratio)
             ray_batch = ray_samplers[i].random_sample(
@@ -244,23 +248,29 @@ def ddp_train_nerf(local_rank, args):
                 neg_ratio=current_neg_ratio,
                 temporal_slices=max(1, args.event_temporal_slices)
             )
+           
             if args.use_cta_fusion and 'cta_fusion' in models:
                 cta_fusion = models['cta_fusion']
                 mid_t = 0.5 * (start_time + end_time)
                 rgb_prev_np = _closest_frame_from_sampler(ray_samplers[i], start_time)
                 rgb_t_np = _closest_frame_from_sampler(ray_samplers[i], mid_t)
                 rgb_next_np = _closest_frame_from_sampler(ray_samplers[i], end_time)
+
                 if rgb_prev_np is not None and rgb_t_np is not None and rgb_next_np is not None:
                     rgb_prev = torch.from_numpy(rgb_prev_np).float().view(1, ray_samplers[i].H, ray_samplers[i].W, -1).permute(0, 3, 1, 2).to(rank)
                     rgb_t = torch.from_numpy(rgb_t_np).float().view(1, ray_samplers[i].H, ray_samplers[i].W, -1).permute(0, 3, 1, 2).to(rank)
                     rgb_next = torch.from_numpy(rgb_next_np).float().view(1, ray_samplers[i].H, ray_samplers[i].W, -1).permute(0, 3, 1, 2).to(rank)
+
                     evt_prev = _build_event_voxel_from_stream(ray_samplers[i], start_time, mid_t, args.cta_event_bins, rank)
                     evt_next = _build_event_voxel_from_stream(ray_samplers[i], mid_t, end_time, args.cta_event_bins, rank)
                     f_t_map = cta_fusion(rgb_prev, rgb_t, rgb_next, evt_prev, evt_next)
+
                     uv = ray_batch['pixel_uv'].to(rank).unsqueeze(0)
-                    ray_batch['cta_ray_feat'] = sample_feature_by_uv(f_t_map, uv).squeeze(0)
+                    f_t = sample_feature_by_uv(f_t_map, uv).squeeze(0)
+                    ray_batch['cta_ray_feat'] = f_t
                 else:
                     ray_batch['cta_ray_feat'] = None
+            
             for key in ray_batch:
                 # print(key, torch.is_tensor(ray_batch[key]), ray_batch[key])
                 if torch.is_tensor(ray_batch[key]):
@@ -304,6 +314,7 @@ def ddp_train_nerf(local_rank, args):
         optim = models['optim']
         lr_scheduler = models['lr_scheduler']
         net = models['net']
+        supports_ray_feat = _net_accepts_ray_feat(net)
 
         if args.optimize_transform: # todo: get rid of this transforms stuff?
             net.unfreeze_transform()
@@ -414,14 +425,16 @@ def ddp_train_nerf(local_rank, args):
                 all_rets = []
                 cta_ray_feat = ray_batch.get('cta_ray_feat', None)
 
+                net_kwargs = {'ray_feat': cta_ray_feat} if supports_ray_feat else {}
+
                 if not args.is_rgb_only:
                     # ret_start = net(ray_batch['ray_o'], ray_batch['ray_d'], ray_batch['start_ray_t'], fg_far_depth, fg_depth_start, ray_batch['background_linear'], global_step)
                     # ret_end = net(ray_batch['ray_o'], ray_batch['ray_d'], ray_batch['end_ray_t'], fg_far_depth, fg_depth_end, ray_batch['background_linear'], global_step)
-                    ret_start = net(ray_batch['ray_o'], ray_batch['ray_d'], ray_batch['start_ray_t'], fg_far_depth, fg_depth_start, ray_batch['background_linear'], global_step, ray_feat=cta_ray_feat)
-                    ret_end = net(ray_batch['ray_o'], ray_batch['ray_d'], ray_batch['end_ray_t'], fg_far_depth, fg_depth_end, ray_batch['background_linear'], global_step, ray_feat=cta_ray_feat)
+                    ret_start = net(ray_batch['ray_o'], ray_batch['ray_d'], ray_batch['start_ray_t'], fg_far_depth, fg_depth_start, ray_batch['background_linear'], global_step, **net_kwargs)
+                    ret_end = net(ray_batch['ray_o'], ray_batch['ray_d'], ray_batch['end_ray_t'], fg_far_depth, fg_depth_end, ray_batch['background_linear'], global_step, **net_kwargs)
                     all_rets += [ret_start, ret_end]
                 # ret_ref = net(ray_batch['ray_o'], ray_batch['ray_d'], ray_batch['ref_ray_t'], fg_far_depth, fg_depth_ref, ray_batch['background_linear'], global_step)
-                ret_ref = net(ray_batch['ray_o'], ray_batch['ray_d'], ray_batch['ref_ray_t'], fg_far_depth, fg_depth_ref, ray_batch['background_linear'], global_step, ray_feat=cta_ray_feat)
+                ret_ref = net(ray_batch['ray_o'], ray_batch['ray_d'], ray_batch['ref_ray_t'], fg_far_depth, fg_depth_ref, ray_batch['background_linear'], global_step, **net_kwargs)
                 all_rets += [ret_ref]
 
                 # all_rets.append(ret)
@@ -626,9 +639,41 @@ def ddp_train_nerf(local_rank, args):
                 total_loss = loss
             else:
                 total_loss = total_loss + loss
+        if not torch.isfinite(loss):
+                logger.warning(f'Rank {rank} step {global_step} level {m}: non-finite loss detected, skipping backward')
+                optim.zero_grad(set_to_none=True)
+                continue
         scaler.scale(total_loss).backward()
         # if crf_out is not None:
         #     print(crf_out.grad is None, crf_out.grad.abs().mean().item() if crf_out.grad is not None else None)
+
+        # gradient/parameter health metrics for divergence monitoring
+        grad_norm_sq = 0.0
+        param_norm_sq = 0.0
+        nan_count = 0
+        inf_count = 0
+        for pg in optim.param_groups:
+            for p in pg['params']:
+                if p is None:
+                    continue
+                p_det = p.detach()
+                nan_count += torch.isnan(p_det).sum().item()
+                inf_count += torch.isinf(p_det).sum().item()
+                param_norm_sq += float(torch.sum(p_det * p_det).item())
+                if p.grad is not None:
+                    g = p.grad.detach()
+                    nan_count += torch.isnan(g).sum().item()
+                    inf_count += torch.isinf(g).sum().item()
+                    grad_norm_sq += float(torch.sum(g * g).item())
+        grad_norm = grad_norm_sq ** 0.5
+        param_norm = param_norm_sq ** 0.5
+        update_ratio = grad_norm / (param_norm + 1e-12)
+        scalars_to_log['grad_norm'] = grad_norm
+        scalars_to_log['param_norm'] = param_norm
+        scalars_to_log['update_ratio'] = update_ratio
+        scalars_to_log['nan_count'] = float(nan_count)
+        scalars_to_log['inf_count'] = float(inf_count)
+
 
         scaler.step(optim)
         scaler.update()
