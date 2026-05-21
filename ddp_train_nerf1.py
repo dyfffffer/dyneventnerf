@@ -558,8 +558,44 @@ def ddp_train_nerf(local_rank, args):
         # if crf_out is not None:
         #     print(crf_out.grad is None, crf_out.grad.abs().mean().item() if crf_out.grad is not None else None)
 
+        do_norm_stats = (rank == 0) and (global_step % args.i_print == 0 or global_step < 10)
+        param_norm_sq = 0.0
+        grad_norm_sq = 0.0
+        nan_count = 0
+        params_before_step = []
+
+        scaler.unscale_(optim)
+        for group in optim.param_groups:
+            for p in group['params']:
+                if p is None:
+                    continue
+                pdata = p.data
+                param_norm_sq += float(torch.sum(pdata * pdata).item())
+                nan_count += int(torch.isnan(pdata).sum().item())
+
+                if p.grad is not None:
+                    g = p.grad.data
+                    grad_norm_sq += float(torch.sum(g * g).item())
+                    nan_count += int(torch.isnan(g).sum().item())
+                if do_norm_stats:
+                    params_before_step.append((p, pdata.detach().clone()))
+
         scaler.step(optim)
         scaler.update()
+
+        scalars_to_log['grad_norm'] = np.sqrt(max(grad_norm_sq, 0.0))
+        scalars_to_log['param_norm'] = np.sqrt(max(param_norm_sq, 0.0))
+        scalars_to_log['nan_count'] = float(nan_count)
+
+        if do_norm_stats and params_before_step:
+            update_norm_sq = 0.0
+            for p, p_before in params_before_step:
+                dp = p.data - p_before
+                update_norm_sq += float(torch.sum(dp * dp).item())
+            update_norm = np.sqrt(max(update_norm_sq, 0.0))
+            denom = np.sqrt(max(param_norm_sq, 0.0)) + 1e-12
+            scalars_to_log['update_ratio'] = update_norm / denom
+
         scalars_to_log['learning_rate'.format(m)] = lr_scheduler.get_last_lr()[0]
         lr_scheduler.step()
         ### end of core optimization loop
