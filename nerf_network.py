@@ -1,4 +1,5 @@
 from collections import OrderedDict
+from network.cta_fusion_arch import NeRFFiLMModulator
 
 import numpy as np
 import torch
@@ -273,9 +274,11 @@ class MLPNet(nn.Module):
         rgb_layers.append(nn.Sigmoid())     # rgb values are normalized to [0, 1]
         # rgb_layers.append(nn.Softplus())     # rgb values are normalized to [0, inf]
         self.rgb_layers = nn.Sequential(*rgb_layers)
+        self.film_mod = NeRFFiLMModulator(feat_dim=64, hidden_dim=W)
         # self.rgb_layers.apply(my_init)
 
-    def forward(self, pts, viewdirs, iteration, embedder_position, embedder_viewdir):
+    def forward(self, pts, viewdirs, iteration, embedder_position, embedder_viewdir, ray_feat=None):
+    # def forward(self, pts, viewdirs, iteration, embedder_position, embedder_viewdir):
         '''
         :param input: [..., input_ch+input_ch_viewdirs]
         :return [..., 4]
@@ -295,6 +298,17 @@ class MLPNet(nn.Module):
             if i in self.skips:
                 base = torch.cat((input_pts, base), dim=-1)
             base = self.base_layers[i+1](base)
+
+        if ray_feat is not None:
+            rf = torch.nan_to_num(ray_feat, nan=0.0, posinf=0.0, neginf=0.0)
+            rf = rf.clamp(-10.0, 10.0)
+            if rf.shape[-1] != 64:
+                if rf.shape[-1] > 64:
+                    rf = rf[..., :64]
+                else:
+                    rf = F.pad(rf, (0, 64-rf.shape[-1]))
+            rf = rf.unsqueeze(-2).expand(*base.shape[:-2], base.shape[-2], rf.shape[-1])
+            base = self.film_mod(base, rf)
 
         sigma = self.sigma_layers(base)
         sigma = torch.abs(sigma)
@@ -394,8 +408,8 @@ class TCNNNet(nn.Module):
             },
         )
 
-
-    def forward(self, pts, viewdirs, iteration, embedder_position, embedder_viewdir):
+    def forward(self, pts, viewdirs, iteration, embedder_position, embedder_viewdir, ray_feat=None):
+    # def forward(self, pts, viewdirs, iteration, embedder_position, embedder_viewdir):
         '''
         :param input: [..., input_ch+input_ch_viewdirs]
         :return [..., 4]
@@ -541,8 +555,8 @@ class TensoRFVMNet(nn.Module):
         self.ZTmat = nn.Parameter(torch.randn(1, F*R, N, Ntime)/R*init_gain)
 
 
-
-    def forward(self, pts, viewdirs, iteration, embedder_position, embedder_viewdir):
+    def forward(self, pts, viewdirs, iteration, embedder_position, embedder_viewdir, ray_feat=None):
+    # def forward(self, pts, viewdirs, iteration, embedder_position, embedder_viewdir):
         '''
         :param input: [..., input_ch+input_ch_viewdirs]
         :return [..., 4]
@@ -701,8 +715,8 @@ class TensoRFCPNet(nn.Module):
 
         self.active_idx.fill_(new_idx)
 
-
-    def forward(self, pts, viewdirs, iteration, embedder_position, embedder_viewdir):
+    def forward(self, pts, viewdirs, iteration, embedder_position, embedder_viewdir, ray_feat=None):
+    # def forward(self, pts, viewdirs, iteration, embedder_position, embedder_viewdir):
         '''
         :param input: [..., input_ch+input_ch_viewdirs]
         :return [..., 4]

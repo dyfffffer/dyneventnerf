@@ -25,7 +25,21 @@
 
 # ======================多GPU运行=====================================
 #  使用 torchrun 启动 DDP，每张卡一个进程
-export CUDA_VISIBLE_DEVICES=2,3
+# export CUDA_VISIBLE_DEVICES=2,3
+# unset LD_LIBRARY_PATH
+# export scene=lego_dyn2
+# export common="--train_split train_0 --N_iters 150001 --N_anneal_lambda 30000 --use_lr_scheduler False --event_threshold 0.5 --tstart 0 --tend 1000 --neg_ratio 0.9 --tonemap_eps 1e-2 --use_viewdirs False --damping_strength 1.0"
+# export base="--config configs/mlp2_lambda1e-3.txt --lrate 1e-4 --max_freq_log2_pos 14 --max_freq_log2_time 7"
+# export fullmodel="${base} --lambda_reg 1e-2"
+# export sceneargs=""
+
+# torchrun --nproc_per_node=2 --master_port=12345 ./ddp_train_nerf1.py \
+#     --expname exp_nocrf_notem_${scene} \
+#     --scene dynsyn/${scene} \
+#     --crf_lrate 0 \
+#     $common $sceneargs $fullmodel 
+
+export CUDA_VISIBLE_DEVICES=0,1
 unset LD_LIBRARY_PATH
 export scene=lego_dyn2
 export common="--train_split train_0 --N_iters 150001 --N_anneal_lambda 30000 --use_lr_scheduler False --event_threshold 0.5 --tstart 0 --tend 1000 --neg_ratio 0.9 --tonemap_eps 1e-2 --use_viewdirs False --damping_strength 1.0"
@@ -33,10 +47,16 @@ export base="--config configs/mlp2_lambda1e-3.txt --lrate 1e-4 --max_freq_log2_p
 export fullmodel="${base} --lambda_reg 1e-2"
 export sceneargs=""
 
-torchrun --nproc_per_node=2 --master_port=12345 ./ddp_train_nerf1.py \
-    --expname exp_nocrf_notem_${scene} \
+torchrun --nproc_per_node=2 --master_port=12346 ./ddp_train_nerf1.py \
+    --expname exp_pure_cta_${scene} \
     --scene dynsyn/${scene} \
     --crf_lrate 0 \
+    --use_cta_fusion True \
+    --cta_event_bins 8 \
+    --cta_feat_ch 32 \
+    --cta_loss_high_w 0.05 \
+    --cta_loss_low_w 0.05 \
+    --cta_warmup_iters 2000 \
     $common $sceneargs $fullmodel 
 
 # tensorboard --logdir="/data/dyf/DATA/DynEventnerf/logs/exp_add_new_tensor_${scene}" --port=6006 &

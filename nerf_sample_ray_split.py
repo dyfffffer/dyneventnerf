@@ -520,6 +520,9 @@ class RaySamplerSingleEventStream:
         ref_rays_t = ref_t * torch.ones_like(rays_d[..., 0])
 
         color_mask = self.color_mask[select_inds, :]
+        u = (select_inds % self.W).astype(np.float32)
+        v = (select_inds // self.W).astype(np.float32)
+        pixel_uv = np.stack([u, v], axis=-1)
 
         ret = OrderedDict([
             ('ray_o', rays_o),
@@ -540,6 +543,7 @@ class RaySamplerSingleEventStream:
             ('color_mask', color_mask),
             ('mask', mask),
             ('background_linear', background_linear),
+            ('pixel_uv', pixel_uv),
         ])
         # return torch tensors
         for k in ret:

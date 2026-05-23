@@ -20,6 +20,7 @@ from ddp_sampling import intersect_cylinder, intersect_sphere, perturb_samples, 
 from render_single_image1 import render_single_image
 from create_nerf import create_nerf
 from tonemapping import Gamma22, EventLogSpace
+from network.cta_fusion_arch import sample_feature_by_uv, FusionLosses
 
 RGBGRAY = torch.tensor([0.299,0.587,0.114])
 
@@ -77,9 +78,19 @@ def get_sample_sizes(total, split_count):
 # -------------------------------
 # DDP 修改：传入 local_rank，初始化分布式
 # -------------------------------
+def _build_cta_from_batch(ray_batch, args, device):
+    n = ray_batch['ray_o'].shape[0]
+    rgb = torch.nan_to_num(ray_batch['rgb_linear'].to(device), nan=0.0).clamp(0.0, 1.0)
+    ev = torch.zeros((1, args.cta_event_bins, 1, n), device=device, dtype=rgb.dtype)
+    if ray_batch.get('events') is not None:
+        e = torch.nan_to_num(ray_batch['events'].to(device), nan=0.0).mean(dim=-1)
+        bins = torch.clamp(((e + 1.0) * 0.5 * (args.cta_event_bins - 1)).long(), 0, args.cta_event_bins - 1)
+        idx = torch.arange(n, device=device)
+        ev[0, bins, 0, idx] = e
+    rgb_bchw = rgb.t().unsqueeze(0).unsqueeze(2)
+    return rgb_bchw, ev
+
 def ddp_train_nerf(local_rank, args):
-    
-    
     print(f"=== Rank {local_rank} starting ===")
     
     rank = local_rank
@@ -254,6 +265,8 @@ def ddp_train_nerf(local_rank, args):
         optim = models['optim']
         lr_scheduler = models['lr_scheduler']
         net = models['net']
+        cta_fusion = models.get('cta_fusion', None)
+        cta_losses = FusionLosses().to(rank) if (cta_fusion is not None and args.use_cta_fusion) else None
 
         if args.optimize_transform: # todo: get rid of this transforms stuff?
             net.unfreeze_transform()
@@ -363,10 +376,25 @@ def ddp_train_nerf(local_rank, args):
 
                 all_rets = []
                 if not args.is_rgb_only:
-                    ret_start = net(ray_batch['ray_o'], ray_batch['ray_d'], ray_batch['start_ray_t'], fg_far_depth, fg_depth_start, ray_batch['background_linear'], global_step)
-                    ret_end = net(ray_batch['ray_o'], ray_batch['ray_d'], ray_batch['end_ray_t'], fg_far_depth, fg_depth_end, ray_batch['background_linear'], global_step)
+                    # ret_start = net(ray_batch['ray_o'], ray_batch['ray_d'], ray_batch['start_ray_t'], fg_far_depth, fg_depth_start, ray_batch['background_linear'], global_step)
+                    # ret_end = net(ray_batch['ray_o'], ray_batch['ray_d'], ray_batch['end_ray_t'], fg_far_depth, fg_depth_end, ray_batch['background_linear'], global_step)
+                    ray_feat = None
+                    cta_aux_high = torch.zeros(1, device=rank)
+                    cta_aux_low = torch.zeros(1, device=rank)
+                    if args.use_cta_fusion and cta_fusion is not None and ray_batch.get('pixel_uv') is not None:
+                        rgb_t, ev_t = _build_cta_from_batch(ray_batch, args, rank)
+                        f_t_map = cta_fusion(rgb_t, rgb_t, rgb_t, ev_t, ev_t)
+                        uv = ray_batch['pixel_uv'].to(rank).float()
+                        uv[..., 0] = 2.0 * (uv[..., 0] / max(1.0, float(ray_samplers[0].W - 1))) - 1.0
+                        uv[..., 1] = 2.0 * (uv[..., 1] / max(1.0, float(ray_samplers[0].H - 1))) - 1.0
+                        ray_feat = sample_feature_by_uv(f_t_map, uv.unsqueeze(0)).squeeze(0)
+                        ray_feat = torch.nan_to_num(ray_feat, nan=0.0, posinf=0.0, neginf=0.0).clamp(-10.0, 10.0)
+                    ret_start = net(ray_batch['ray_o'], ray_batch['ray_d'], ray_batch['start_ray_t'], fg_far_depth, fg_depth_start, ray_batch['background_linear'], global_step, ray_feat=ray_feat)
+                    ret_end = net(ray_batch['ray_o'], ray_batch['ray_d'], ray_batch['end_ray_t'], fg_far_depth, fg_depth_end, ray_batch['background_linear'], global_step, ray_feat=ray_feat)
+                    
                     all_rets += [ret_start, ret_end]
-                ret_ref = net(ray_batch['ray_o'], ray_batch['ray_d'], ray_batch['ref_ray_t'], fg_far_depth, fg_depth_ref, ray_batch['background_linear'], global_step)
+                # ret_ref = net(ray_batch['ray_o'], ray_batch['ray_d'], ray_batch['ref_ray_t'], fg_far_depth, fg_depth_ref, ray_batch['background_linear'], global_step)
+                ret_ref = net(ray_batch['ray_o'], ray_batch['ray_d'], ray_batch['ref_ray_t'], fg_far_depth, fg_depth_ref, ray_batch['background_linear'], global_step, ray_feat=ray_feat)
                 all_rets += [ret_ref]
 
                 # all_rets.append(ret)
@@ -460,6 +488,14 @@ def ddp_train_nerf(local_rank, args):
                 else:
                     ref_acc_loss = torch.zeros(1)
 
+                if args.use_cta_fusion and cta_losses is not None and ray_batch.get('events') is not None:
+                    c_hat = ret_ref['rgb_linear'].transpose(0, 1).unsqueeze(0).unsqueeze(2)
+                    event_frame = ray_batch['events'].to(rank).transpose(0, 1).unsqueeze(0).unsqueeze(2)
+                    rgb_ref = ref_rgb_gt_linear.transpose(0, 1).unsqueeze(0).unsqueeze(2)
+                    cta_aux_high, cta_aux_low = cta_losses(c_hat, event_frame, rgb_ref)
+                    cta_aux_high = torch.nan_to_num(cta_aux_high, nan=0.0, posinf=0.0, neginf=0.0)
+                    cta_aux_low = torch.nan_to_num(cta_aux_low, nan=0.0, posinf=0.0, neginf=0.0)
+                    
                 # --- ablation options ---
                 if not args.use_event_loss:
                     event_loss = event_loss * 0
@@ -473,6 +509,10 @@ def ddp_train_nerf(local_rank, args):
                     loss = event_loss + ref_rgb_loss*0.01 + ref_acc_loss
                 else:
                     loss = ref_rgb_loss
+
+                if args.use_cta_fusion and cta_losses is not None:
+                    warm = min(1.0, float(global_step + 1) / max(1, int(args.cta_warmup_iters)))
+                    loss = loss + warm * (args.cta_loss_high_w * cta_aux_high + args.cta_loss_low_w * cta_aux_low)
                 # loss = rgb_loss
                 # loss = img2mse(ret['rgb'], rgb_gt)
                 # loss = img2mse(ret['rgb'], (diff_gt-diff_gt.min())/(diff_gt.max()-diff_gt.min()))

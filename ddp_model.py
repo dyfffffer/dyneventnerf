@@ -157,7 +157,7 @@ class NerfNet(nn.Module):
             p.requires_grad_(True)
 
 
-    def forward(self, ray_o, ray_d, ray_t, fg_z_max, fg_z_vals, bg_rgb_linear, iteration):
+    def forward(self, ray_o, ray_d, ray_t, fg_z_max, fg_z_vals, bg_rgb_linear, iteration, ray_feat=None):
         '''
         :param ray_o, ray_d: [..., 3]
         :param fg_z_max: [...,]

@@ -6,6 +6,7 @@ import torch.optim
 from ddp_model import NerfNet
 from ddp_config import logger
 from network.crf import CRF
+from network.cta_fusion_arch import ThreeFrameCTAFusion
 
 
 def create_nerf(rank, args, camera_mgr, load_camera_mgr=True, load_optimizer=True, use_lr_scheduler=True):
@@ -22,9 +23,10 @@ def create_nerf(rank, args, camera_mgr, load_camera_mgr=True, load_optimizer=Tru
     net = NerfNet(args).to(rank)
     # 创建 CRF 网络
     crf_net = CRF().to(rank)
-    # net = DDP(net, device_ids=[rank], output_device=rank, find_unused_parameters=False)
-    # net = DDP(net, device_ids=[rank], output_device=rank)
-    # optim = torch.optim.Adam(net.parameters(), lr=args.lrate)
+    # 创建 CTA Fusion 模块
+    cta_fusion = None
+    if getattr(args, 'use_cta_fusion', False):
+        cta_fusion = ThreeFrameCTAFusion(event_bins=args.cta_event_bins, feat_ch=args.cta_feat_ch).to(rank)
 
     #增加crf参数化
     crf_lrate = getattr(args, "crf_lrate", args.lrate)
@@ -32,6 +34,7 @@ def create_nerf(rank, args, camera_mgr, load_camera_mgr=True, load_optimizer=Tru
         [
             {"params": net.parameters(), "lr": args.lrate},
             {"params": crf_net.parameters(), "lr": crf_lrate},
+            *([{"params": cta_fusion.parameters(), "lr": args.lrate}] if cta_fusion is not None else []),
         ],
         weight_decay=args.weight_decay
     )
@@ -39,10 +42,9 @@ def create_nerf(rank, args, camera_mgr, load_camera_mgr=True, load_optimizer=Tru
     models["net"] = net
     models["crf_net"] = crf_net
     models["optim"] = optim
+    if cta_fusion is not None:
+        models["cta_fusion"] = cta_fusion
 
-
-
-    # optim = torch.optim.AdamW(net.parameters(), lr=args.lrate, weight_decay=args.weight_decay)
     if use_lr_scheduler:
         lr_scheduler = torch.optim.lr_scheduler.LambdaLR(optim, lambda it: it/4000 if it < 4000 else 0.95**(it/10000))
     else:
@@ -106,6 +108,10 @@ def create_nerf(rank, args, camera_mgr, load_camera_mgr=True, load_optimizer=Tru
         to_load = torch.load(fpath, map_location=map_location)
 
         names = ['net']
+        if 'cta_fusion' in to_load and 'cta_fusion' in models:
+            names.append('cta_fusion')
+        elif 'cta_fusion' in models:
+            logger.warning('CTA fusion is enabled but checkpoint has no cta_fusion weights; training from init for CTA module.')
         if 'crf_net' in to_load:
             names.append('crf_net')
         if load_optimizer:

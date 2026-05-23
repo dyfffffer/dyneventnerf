@@ -244,6 +244,14 @@ def config_parser(config_path=None):
     parser.add_argument("--i_img", type=int, default=500, help='frequency of tensorboard image logging (if <0, then no images are logged)')
     parser.add_argument("--i_weights", type=int, default=10000, help='frequency of weight ckpt saving')
 
+    # cta fusion options
+    parser.add_argument("--use_cta_fusion", type=str2bool, default=False, help='enable CTA RGB-event temporal fusion')
+    parser.add_argument("--cta_event_bins", type=int, default=8, help='event voxel bins for CTA')
+    parser.add_argument("--cta_feat_ch", type=int, default=32, help='CTA feature channels')
+    parser.add_argument("--cta_loss_high_w", type=float, default=0.0, help='CTA high-frequency loss weight')
+    parser.add_argument("--cta_loss_low_w", type=float, default=0.0, help='CTA low-frequency loss weight')
+    parser.add_argument("--cta_warmup_iters", type=int, default=0, help='linear warmup iters for CTA auxiliary losses')
+    
     parser.add_argument("--local_rank", type=int, default=0, help="Local rank for torchrun")
 
     return parser
