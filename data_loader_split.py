@@ -37,7 +37,6 @@ def find_files_per_frames(dir_, exts, tstart=None, tend=None):
     [[(0, '0000/0.png'), (100, '0100/0.png')],
      [(0, '0000/1.png'), (100, '0100/1.png')],
      [(0, '0000/2.png'), (100, '0100/2.png')]]'''
-
     assert os.path.isdir(dir_)
     views_per_frame = []
     for frame in os.listdir(dir_):

@@ -25,18 +25,21 @@
 
 # ======================多GPU运行=====================================
 #  使用 torchrun 启动 DDP，每张卡一个进程
-# export scene=lego_dyn2
-# export common="--train_split train_0 --N_iters 150001 --N_anneal_lambda 30000 --use_lr_scheduler False --event_threshold 0.5 --tstart 0 --tend 1000 --neg_ratio 0.9 --tonemap_eps 1e-2 --use_viewdirs False --damping_strength 1.0"
-# export base="--config configs/mlp2_lambda1e-3.txt --lrate 1e-4 --max_freq_log2_pos 14 --max_freq_log2_time 7"
-# export fullmodel="${base} --lambda_reg 1e-2"
-# export sceneargs=""
+export CUDA_VISIBLE_DEVICES=2,3
+unset LD_LIBRARY_PATH
+export scene=lego_dyn2
+export common="--train_split train_0 --N_iters 150001 --N_anneal_lambda 30000 --use_lr_scheduler False --event_threshold 0.5 --tstart 0 --tend 1000 --neg_ratio 0.9 --tonemap_eps 1e-2 --use_viewdirs False --damping_strength 1.0"
+export base="--config configs/mlp2_lambda1e-3.txt --lrate 1e-4 --max_freq_log2_pos 14 --max_freq_log2_time 7"
+export fullmodel="${base} --lambda_reg 1e-2"
+export sceneargs=""
 
-# torchrun --nproc_per_node=2 --master_port=12345 ./ddp_train_nerf1.py \
-#     --expname exp_add_tem_loss_${scene} \
-#     --scene dynsyn/${scene} \
-#     $common $sceneargs $fullmodel
+torchrun --nproc_per_node=2 --master_port=12345 ./ddp_train_nerf1.py \
+    --expname exp_nocrf_notem_${scene} \
+    --scene dynsyn/${scene} \
+    --crf_lrate 0 \
+    $common $sceneargs $fullmodel 
 
-## tensorboard --logdir="/data/dyf/DATA/DynEventnerf/logs/exp_${scene}" --port=6006 &
+# tensorboard --logdir="/data/dyf/DATA/DynEventnerf/logs/exp_add_new_tensor_${scene}" --port=6006 &
 # # 访问地址：localhost:6009
 ## tensorboard --logdir="/root/log/exp_add_gray_color${scene}" --port=6011 &
 ## tensorboard --logdir="/root/log/exp_${scene}" --port=6012 &
@@ -44,12 +47,15 @@
 
 
 # ======================渲染测试集=====================================
-# export x="exp_add_tem_loss_lego_dyn2"
-# torchrun --nproc_per_node=2 ddp_test_nerf_video1.py --render_split validation --write_video False --render_bullet_time False --testskip 1 --config /root/log/$x/args.txt --render_timestamp_frames 5 --render_timestamp_periods 1.25
+# export x="exp_add_new_tensor_lego_dyn2"
+# torchrun --nproc_per_node=2 ddp_test_nerf_video1.py \
+#     --render_split validation --write_video False --render_bullet_time False \
+#     --testskip 1 --config /data/dyf/DATA/DynEventnerf/logs/$x/args.txt \
+#     --render_timestamp_frames 5 --render_timestamp_periods 1.25  
 # ===========================================================
 
 
 # =======================计算指标====================================
-# python metric/main.py /root/log/eval_lego_dyn2/add_tem_loss /root/log/eval_lego_dyn2/gt
-# python metric/compssim.py /root/log/eval_lego_dyn2/add_tem_loss_corr /root/log/eval_lego_dyn2/gt
-python metric/complpips.py /root/log/eval_lego_dyn2/add_tem_loss_corr /root/log/eval_lego_dyn2/gt
+# python metric/main.py logs/eval_lego_dyn2/no_tem+crf logs/eval_lego_dyn2/gt
+# python metric/compssim.py logs/eval_lego_dyn2/no_tem+crf logs/eval_lego_dyn2/gt
+# python metric/complpips.py logs/eval_lego_dyn2/no_tem+crf logs/eval_lego_dyn2/gt
